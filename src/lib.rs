@@ -1,6 +1,7 @@
 pub mod alert;
 pub mod config;
 pub mod heuristics;
+pub mod scan_js;
 pub mod watch_file;
 pub mod watch_network;
 pub mod watch_persistence;
