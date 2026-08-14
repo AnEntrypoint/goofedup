@@ -1,6 +1,6 @@
 # goofedup
 
-![I done goofed](https://media1.tenor.com/m/4b5W1p8bSKcAAAAd/goofed-messed.gif)
+![you done goofed](https://media.giphy.com/media/XyIBLhXPveD8k/giphy.gif)
 
 Cross-platform structural-anomaly watcher: catches malware by **shape**, not signature.
 
