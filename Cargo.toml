@@ -1,0 +1,43 @@
+[package]
+name = "goofedup"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform structural-anomaly watcher: catches malware by shape, not signature."
+license = "MIT"
+repository = "https://github.com/AnEntrypoint/goofedup"
+
+[lib]
+name = "goofedup"
+path = "src/lib.rs"
+
+[[bin]]
+name = "goofedup"
+path = "src/main.rs"
+
+[dependencies]
+notify = "8"
+sysinfo = "0.33"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+regex = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ctrlc = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Networking_WinSock",
+  "Win32_System_Diagnostics_Etw",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"
