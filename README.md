@@ -1,8 +1,12 @@
 # goofedup
 
+![I done goofed](https://media1.tenor.com/m/4b5W1p8bSKcAAAAd/goofed-messed.gif)
+
 Cross-platform structural-anomaly watcher: catches malware by **shape**, not signature.
 
-Born from a real incident: a legitimate app's small bootstrap file (should be ~40 bytes) was silently overwritten with a 270KB obfuscated payload, the original preserved next to it as a `.orig` backup, and it launched an obfuscated `node -e "..."` process talking to a hardcoded C2 IP. No signature database had any of this — every one of those facts is a **structural** anomaly a host can detect on its own, without ever having seen this exact malware before.
+We done goofed. Somebody's Discord bootstrap file — a 40-byte one-liner that should read `module.exports = require('./core.asar')` and nothing else — quietly ballooned into a 270KB wall of obfuscated garbage, kept the original as a polite `.orig` backup like it was doing us a favor, and then popped an obfuscated `node -e "..."` shell that phoned home to a C2 IP like it had somewhere to be. Meanwhile the Recycle Bin was moonlighting as a warehouse for 21,000 mystery Go and JS files with names like a cat walked across a keyboard.
+
+Nobody signed anything. No antivirus signature file had ever heard of this exact flavor of nonsense. It just... looked wrong, the way a stranger wearing your coworker's badge looks wrong. So `goofedup` was born to notice *wrong shapes*, not memorized fingerprints — because next time we'd rather not have to goof up before we wisen up.
 
 ## What it watches
 
