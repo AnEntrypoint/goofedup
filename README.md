@@ -52,17 +52,29 @@ Ctrl+C to stop. Logs to `~/.goofedup/goofedup.log` (and stdout).
 For everyday use on Windows, `goofedup-gui.exe` runs the same watchers with no
 console window and a system-tray icon instead:
 
-- **Tray icon** — cyan while quiet, turns red the moment an unacknowledged
-  Critical alert lands.
+- **First launch** — a friendly welcome toast explains what's about to happen
+  before any watcher fires an alert, so a new user is never left wondering if
+  the app is actually doing anything.
+- **Tray icon** — a shield glyph, cyan while quiet, gray while paused, red the
+  moment an unacknowledged Critical alert lands.
+- **Live tooltip** — hover the tray icon for an at-a-glance status ("watching,
+  all clear", "3 warning(s) today", "PAUSED", or a call to attention when a
+  Critical alert needs you) instead of a static string.
+- **Double-click the tray icon** to jump straight to recent alerts — the
+  same shortcut every other tray app uses, no menu required.
 - **Toast notifications** — every Warn/Critical alert pops a native Windows
-  toast, so you don't have to be staring at a terminal to notice "we done
-  goofed."
+  toast; **click the toast itself** to open the alert history directly,
+  instead of just dismissing it.
 - **Right-click menu:**
-  - *Open Recent Alerts* — opens the alert history (level, evidence,
-    suggested action) in Notepad and clears the red-icon flag.
-  - *Show Config* — opens the resolved watch list/thresholds in Notepad.
-  - *Start with Windows* — toggles launch-at-login via the per-user registry
-    Run key (no admin rights needed).
+  - *Open Recent Alerts* — opens a readable alert history (summary counts up
+    top, newest first, level/evidence/suggested action per entry) and clears
+    the red-icon flag.
+  - *Show Config* — opens the resolved watch list/thresholds.
+  - *Pause Alerts* — a checkable item that silences new alerts on demand
+    (the tray icon goes gray, the tooltip says PAUSED) without killing the
+    app or its watcher threads, for known maintenance windows.
+  - *Start with Windows* — a checkable item toggling launch-at-login via the
+    per-user registry Run key (no admin rights needed).
   - *Quit* — stops every watcher thread cleanly and exits.
 - Launching a second copy while one is already running just exits — no
   duplicate watchers.

@@ -59,6 +59,17 @@ impl History {
             .any(|e| e.level == Level::Critical)
     }
 
+    /// (critical_count, warn_count) across the retained history -- used for
+    /// the tray tooltip's at-a-glance status text. "Today" in name only:
+    /// the bounded 200-entry retention window is a reasonable proxy for
+    /// "recent" without tracking a separate day boundary.
+    pub fn counts_today(&self) -> (usize, usize) {
+        let entries = lock_recovering(&self.entries);
+        let critical = entries.iter().filter(|e| e.level == Level::Critical).count();
+        let warn = entries.iter().filter(|e| e.level == Level::Warn).count();
+        (critical, warn)
+    }
+
     pub fn clear_critical_flag(&self) {
         // Acknowledgement drops severity to Warn in the retained view so the
         // tray icon reverts without discarding history.
@@ -73,11 +84,23 @@ impl History {
     pub fn render_text(&self) -> String {
         let entries = lock_recovering(&self.entries);
         if entries.is_empty() {
-            return "No alerts yet.".to_string();
+            return "goofedup -- no alerts yet. Everything looks normal.".to_string();
         }
+
+        let critical = entries.iter().filter(|e| e.level == Level::Critical).count();
+        let warn = entries.iter().filter(|e| e.level == Level::Warn).count();
+        let info = entries.iter().filter(|e| e.level == Level::Info).count();
+
         let mut out = String::new();
+        out.push_str(&format!(
+            "goofedup alert history -- {} critical, {} warning, {} info (newest first)\n",
+            critical, warn, info
+        ));
+        out.push_str(&"=".repeat(70));
+        out.push('\n');
         for e in entries.iter() {
-            out.push_str(&format!("[{}] [{}] [{}] {}\n", e.ts, e.level, e.category, e.message));
+            out.push('\n');
+            out.push_str(&format!("[{}] {:<8} {:<20} {}\n", e.ts, e.level.to_string(), e.category, e.message));
             if let Some(ev) = &e.evidence {
                 out.push_str(&format!("    evidence: {ev}\n"));
             }

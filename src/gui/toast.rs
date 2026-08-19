@@ -5,6 +5,8 @@
 
 use windows::core::HSTRING;
 use windows::Data::Xml::Dom::XmlDocument;
+use windows::core::IInspectable;
+use windows::Foundation::TypedEventHandler;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
@@ -16,9 +18,11 @@ pub fn init() {
     }
 }
 
-pub fn show(title: &str, body: &str) {
+/// Shows a toast; `on_activated` fires when the user clicks the toast body
+/// (not a dismiss or a timeout) -- the click-to-open-history affordance.
+pub fn show(title: &str, body: &str, on_activated: impl Fn() + Send + Sync + 'static) {
     let xml = format!(
-        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        "<toast activationType=\"foreground\" launch=\"open-history\"><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
         xml_escape(title),
         xml_escape(body)
     );
@@ -32,6 +36,13 @@ pub fn show(title: &str, body: &str) {
     let Ok(notification) = ToastNotification::CreateToastNotification(&doc) else {
         return;
     };
+    let handler = TypedEventHandler::<ToastNotification, IInspectable>::new(
+        move |_sender, _args| {
+            on_activated();
+            Ok(())
+        },
+    );
+    let _ = notification.Activated(&handler);
     if let Ok(notifier) = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(AUMID)) {
         let _ = notifier.Show(&notification);
     }

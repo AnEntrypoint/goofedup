@@ -70,6 +70,16 @@ jobs:
             target: aarch64-pc-windows-msvc
             artifact: goofedup-windows-arm64.exe
             bin_name: goofedup.exe
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: goofedup-gui-windows-x64.exe
+            bin_name: goofedup-gui.exe
+            gui: true
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            artifact: goofedup-gui-windows-arm64.exe
+            bin_name: goofedup-gui.exe
+            gui: true
           - os: macos-latest
             target: x86_64-apple-darwin
             artifact: goofedup-macos-x64
@@ -110,7 +120,12 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }}
+        run: |
+          if [ "${{ matrix.gui }}" = "true" ]; then
+            cargo build --release --target ${{ matrix.target }} --features gui --bin goofedup-gui
+          else
+            cargo build --release --target ${{ matrix.target }} --bin goofedup
+          fi
 
       - name: Stage artifact
         shell: bash
