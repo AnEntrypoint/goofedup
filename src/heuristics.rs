@@ -187,6 +187,79 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
     }
 }
 
+/// True if `s` contains a run of 4 or more CONSECUTIVE `\uXXXX` escapes
+/// (no other characters between them) that decode to plain ASCII
+/// identifier-shaped characters (letters, digits, underscore/dollar --
+/// i.e. what a JS identifier is actually made of). Real source code almost
+/// never spells an ASCII identifier this way -- `requ`
+/// decodes to "requ" and is dramatically harder to read/write/diff than
+/// just typing `requ`, so nobody does it by hand and no legitimate
+/// minifier/bundler emits it either (minifiers escape only what actually
+/// needs escaping: non-ASCII, or ASCII that would break the string
+/// literal). Malware hides module names this way specifically so a
+/// plain-text grep for "require"/"child_process"/"process.env" etc. finds
+/// nothing -- the identifier only exists as ASCII after JS's own runtime
+/// unescapes it. Structural, not tied to any specific hidden module name:
+/// a NEW hidden identifier this tool has never seen still gets caught on
+/// shape alone.
+pub fn find_hidden_unicode_escape_run(s: &str) -> Option<Verdict> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    let mut best: Option<(usize, String)> = None;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'u' {
+            let mut run_len = 0usize;
+            let mut decoded = String::new();
+            let mut j = i;
+            while j + 5 < bytes.len() && bytes[j] == b'\\' && bytes[j + 1] == b'u' {
+                let hex = &s[j + 2..j + 6];
+                let Ok(code) = u32::from_str_radix(hex, 16) else {
+                    break;
+                };
+                let Some(ch) = char::from_u32(code) else {
+                    break;
+                };
+                // Only count escapes decoding to a plain-ASCII identifier
+                // character -- this is what distinguishes "hiding an
+                // identifier" from ordinary internationalized string
+                // content (a genuinely non-ASCII string legitimately
+                // escaped, e.g. CJK/emoji, decodes to non-ASCII and never
+                // triggers this).
+                if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$') {
+                    break;
+                }
+                decoded.push(ch);
+                run_len += 1;
+                j += 6;
+            }
+            if run_len >= 4 {
+                let starts_identifier_like = decoded
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                    .unwrap_or(false);
+                if starts_identifier_like {
+                    let better = best.as_ref().map(|(len, _)| run_len > *len).unwrap_or(true);
+                    if better {
+                        best = Some((run_len, decoded.clone()));
+                    }
+                }
+            }
+            i = if run_len > 0 { j } else { i + 1 };
+        } else {
+            i += 1;
+        }
+    }
+
+    best.map(|(run_len, decoded)| Verdict {
+        score: 5,
+        reasons: vec![format!(
+            "{run_len} consecutive \\uXXXX escapes decode to plain-ASCII identifier \"{decoded}\" -- real code never spells an ASCII identifier this way; this is how malware hides module/function names from plain-text grep"
+        )],
+    })
+}
+
 /// True if `exe_path` sits under any deny fragment (e.g. Recycle Bin, Trash)
 /// -- an instant, unconditional flag regardless of process name.
 pub fn is_denied_exec_path(exe_path: &str, deny_fragments: &[String]) -> Option<&'static str> {
@@ -442,5 +515,59 @@ mod tests {
     #[test]
     fn normal_name_is_clean() {
         assert!(score_process_name("cargo.exe", r"C:\Users\user\.cargo\bin\cargo.exe").is_none());
+    }
+
+    #[test]
+    fn four_escape_run_decoding_to_identifier_is_flagged() {
+        // \u0072\u0065\u0071\u0075 decodes to "requ" -- a real, disclosed
+        // hidden-identifier shape, not a specific known module name.
+        let src = "const x = global['\\u0072\\u0065\\u0071\\u0075' + 'ire'];";
+        let v = find_hidden_unicode_escape_run(src).expect("should flag a 4+ run decoding to ASCII identifier chars");
+        assert!(v.reasons[0].contains("requ"));
+    }
+
+    #[test]
+    fn novel_hidden_identifier_with_no_known_name_still_scores() {
+        // Proves this is structural (run-length + decode-shape), not a
+        // fingerprint of any specific hidden module/function name.
+        let src = "x[\\u0071\\u0077\\u0065\\u0072\\u0074\\u0079]();";
+        assert!(
+            find_hidden_unicode_escape_run(src).is_some(),
+            "a completely novel hidden identifier should still score on shape alone"
+        );
+    }
+
+    #[test]
+    fn three_escape_run_is_not_flagged() {
+        // Below the 4+ threshold -- a short escape run is common in
+        // ordinary code (e.g. a single accented character split across a
+        // couple of combining-form escapes) and must not false-positive.
+        let src = "const x = '\\u0061\\u0062\\u0063';";
+        assert!(find_hidden_unicode_escape_run(src).is_none());
+    }
+
+    #[test]
+    fn non_ascii_unicode_escapes_are_not_flagged() {
+        // Legitimate internationalized string content (CJK here) decodes
+        // to non-ASCII -- this is normal, common, and must never trigger:
+        // the detector targets HIDING an ASCII identifier, not unicode
+        // escapes in general.
+        let src = "const greeting = '\\u4f60\\u597d\\u4e16\\u754c';"; // "你好世界"
+        assert!(find_hidden_unicode_escape_run(src).is_none());
+    }
+
+    #[test]
+    fn non_contiguous_escapes_are_not_flagged() {
+        // Same 4 identifier-shaped escapes but with ordinary characters
+        // interleaved between them -- not a contiguous run, so this is not
+        // the hidden-identifier shape at all.
+        let src = "'\\u0072' + 'x' + '\\u0065' + 'y' + '\\u0071' + 'z' + '\\u0075'";
+        assert!(find_hidden_unicode_escape_run(src).is_none());
+    }
+
+    #[test]
+    fn ordinary_js_source_is_clean() {
+        let src = "function main() { console.log('hello world'); return 0; }";
+        assert!(find_hidden_unicode_escape_run(src).is_none());
     }
 }

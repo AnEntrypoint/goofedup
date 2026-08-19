@@ -1,7 +1,8 @@
 use clap::Parser;
 use goofedup::alert::AlertSink;
 use goofedup::config::Config;
-use goofedup::{watch_file, watch_network, watch_persistence, watch_process};
+use goofedup::{scan_js, watch_file, watch_network, watch_persistence, watch_process};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -24,6 +25,14 @@ struct Args {
     /// Print the resolved config (watched paths, thresholds) and exit.
     #[arg(long)]
     show_config: bool,
+
+    /// One-shot scan of a project directory (including node_modules) for
+    /// JS-family source hiding identifiers behind a run of 4+ \uXXXX
+    /// escapes -- the shape malware uses to dodge a plain-text grep for
+    /// require/child_process/eval/etc. Exits with a non-zero status if
+    /// anything was flagged, so it composes with CI/pre-commit tooling.
+    #[arg(long, value_name = "PATH")]
+    scan_deps: Option<PathBuf>,
 }
 
 fn main() {
@@ -33,6 +42,15 @@ fn main() {
     if args.show_config {
         print_config(&cfg);
         return;
+    }
+
+    if let Some(root) = &args.scan_deps {
+        if let Some(parent) = cfg.log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let alerts = AlertSink::new(cfg.log_path.clone());
+        let flagged = scan_js::scan_project(root, &alerts);
+        std::process::exit(if flagged > 0 { 1 } else { 0 });
     }
 
     if let Some(parent) = cfg.log_path.parent() {

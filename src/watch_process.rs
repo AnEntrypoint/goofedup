@@ -88,10 +88,38 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     }
 }
 
-/// Mass file-read (drive scanning / harvesting) detection via sysinfo's
-/// per-process cumulative disk_usage() -- see Config's own doc comment for
-/// the two independent triggers (absolute burst, relative spike vs a
-/// process's own EMA baseline).
+/// Linux's sysinfo disk_usage() surfaces /proc/[pid]/io's `read_bytes`,
+/// which counts actual block-device I/O only -- reads served from page
+/// cache or tmpfs (the common case for a container/VM with warm cache, or
+/// for a scanning process re-reading recently-touched files) report 0
+/// there and the detector never trips. `rchar` counts every byte passed to
+/// read()-family syscalls regardless of cache, which is what a mass
+/// scanning/harvesting process actually produces -- read directly since
+/// sysinfo's DiskUsage does not expose it. Live-witnessed: this container's
+/// own /proc/self/io reports read_bytes=0 for a real page-cache-served
+/// read.
+#[cfg(target_os = "linux")]
+fn total_read_bytes(pid: Pid) -> u64 {
+    let path = format!("/proc/{}/io", pid.as_u32());
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return 0;
+    };
+    for line in contents.lines() {
+        if let Some(rest) = line.strip_prefix("rchar:") {
+            return rest.trim().parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+#[cfg(not(target_os = "linux"))]
+fn total_read_bytes(_pid: Pid, p: &sysinfo::Process) -> u64 {
+    p.disk_usage().total_read_bytes
+}
+
+/// Mass file-read (drive scanning / harvesting) detection -- see Config's
+/// own doc comment for the two independent triggers (absolute burst,
+/// relative spike vs a process's own EMA baseline).
 fn check_read_burst(
     cfg: &Config,
     alerts: &AlertSink,
@@ -99,7 +127,10 @@ fn check_read_burst(
     p: &sysinfo::Process,
     trackers: &mut HashMap<Pid, ReadTracker>,
 ) {
-    let total_read = p.disk_usage().total_read_bytes;
+    #[cfg(target_os = "linux")]
+    let total_read = total_read_bytes(pid);
+    #[cfg(not(target_os = "linux"))]
+    let total_read = total_read_bytes(pid, p);
 
     let tracker = trackers.entry(pid).or_insert_with(|| ReadTracker {
         last_total_read: total_read,
@@ -225,11 +256,23 @@ fn inspect_new_process(cfg: &Config, alerts: &AlertSink, p: &sysinfo::Process) {
     // 3. obfuscated inline-eval command line, only for watched interpreters
     //    (avoids false-positiving on e.g. a long git commit message passed
     //    as an argument to something unrelated).
+    //
+    // On Linux, sysinfo's p.name() is /proc/[pid]/comm -- for a
+    // multi-threaded interpreter like node this is the per-thread name
+    // (MainThread, V8Worker, ...), NOT the binary name, even for the PID
+    // that IS the process itself. Matching against the exe basename too
+    // catches the real interpreter regardless of what comm reports.
+    // Live-witnessed: a real spawned `node -e <payload>` never matched on
+    // name alone in this container.
     let name_lower = name.to_lowercase();
-    let is_watched_interp = cfg
-        .watched_interpreters
-        .iter()
-        .any(|i| i.to_lowercase() == name_lower);
+    let exe_basename_lower = std::path::Path::new(&exe_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let is_watched_interp = cfg.watched_interpreters.iter().any(|i| {
+        let i_lower = i.to_lowercase();
+        i_lower == name_lower || i_lower == exe_basename_lower
+    });
     if is_watched_interp {
         if let Some(v) = score_command_line(&cmdline) {
             let head: String = cmdline.chars().take(200).collect();

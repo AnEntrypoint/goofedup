@@ -3,6 +3,7 @@ pub mod config;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod heuristics;
+pub mod scan_js;
 pub mod watch_file;
 pub mod watch_network;
 pub mod watch_persistence;
