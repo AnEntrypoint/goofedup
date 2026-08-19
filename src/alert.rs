@@ -9,7 +9,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// Every lock in this module guards a plain data structure (an Option, a
 /// unit "are we mid-write" token) with no user code running while it is
@@ -50,7 +50,7 @@ pub struct Alert {
 pub struct AlertSink {
     log_path: PathBuf,
     lock: Mutex<()>,
-    on_alert: Mutex<Option<Box<dyn Fn(&Alert) + Send + Sync>>>,
+    on_alert: Mutex<Option<Arc<dyn Fn(&Alert) + Send + Sync>>>,
 }
 
 impl AlertSink {
@@ -65,11 +65,17 @@ impl AlertSink {
     /// Registers a callback invoked with every emitted Alert, in addition to
     /// the existing console+file output -- the GUI's toast/history hook.
     pub fn set_on_alert(&self, cb: impl Fn(&Alert) + Send + Sync + 'static) {
-        *lock_recovering(&self.on_alert) = Some(Box::new(cb));
+        *lock_recovering(&self.on_alert) = Some(Arc::new(cb));
     }
 
     pub fn emit(&self, a: Alert) {
-        if let Some(cb) = lock_recovering(&self.on_alert).as_ref() {
+        // Clone the Arc and drop the on_alert lock before invoking the
+        // callback -- calling out to arbitrary code (which may itself call
+        // back into emit, the real shape once the GUI's own alerting paths
+        // grow) while still holding this lock is a same-thread self-deadlock
+        // on a non-reentrant Mutex, witnessed live via a nested-emit probe.
+        let cb = lock_recovering(&self.on_alert).clone();
+        if let Some(cb) = cb {
             cb(&a);
         }
         let _guard = lock_recovering(&self.lock);

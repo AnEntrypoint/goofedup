@@ -22,7 +22,7 @@ pub fn is_enabled() -> bool {
             return false;
         }
         let found = RegQueryValueExW(hkey, &HSTRING::from(VALUE_NAME), None, None, None, None).is_ok();
-        RegCloseKey(hkey).ok();
+        let _ = RegCloseKey(hkey);
         found
     }
 }
@@ -35,11 +35,16 @@ pub fn enable() -> bool {
         if RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(RUN_KEY), 0, KEY_WRITE, &mut hkey).is_err() {
             return false;
         }
-        let value = HSTRING::from(exe_str);
-        let bytes = value.as_wide();
-        let byte_slice = std::slice::from_raw_parts(bytes.as_ptr() as *const u8, (bytes.len() + 1) * 2);
+        // REG_SZ requires the buffer to include a trailing UTF-16 NUL;
+        // HSTRING::as_wide() does not include one in its reported length,
+        // so build an explicitly NUL-terminated Vec rather than reading
+        // past the end of its slice (undefined behavior even when the
+        // extra byte happens to be zero).
+        let mut wide: Vec<u16> = HSTRING::from(exe_str).as_wide().to_vec();
+        wide.push(0);
+        let byte_slice = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
         let ok = RegSetValueExW(hkey, &HSTRING::from(VALUE_NAME), 0, REG_SZ, Some(byte_slice)).is_ok();
-        RegCloseKey(hkey).ok();
+        let _ = RegCloseKey(hkey);
         ok
     }
 }
@@ -51,7 +56,7 @@ pub fn disable() -> bool {
             return false;
         }
         let ok = RegDeleteValueW(hkey, &HSTRING::from(VALUE_NAME)).is_ok();
-        RegCloseKey(hkey).ok();
+        let _ = RegCloseKey(hkey);
         ok
     }
 }
