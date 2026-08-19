@@ -39,6 +39,7 @@ pub struct Alert {
 pub struct AlertSink {
     log_path: PathBuf,
     lock: Mutex<()>,
+    on_alert: Mutex<Option<Box<dyn Fn(&Alert) + Send + Sync>>>,
 }
 
 impl AlertSink {
@@ -46,10 +47,20 @@ impl AlertSink {
         Self {
             log_path,
             lock: Mutex::new(()),
+            on_alert: Mutex::new(None),
         }
     }
 
+    /// Registers a callback invoked with every emitted Alert, in addition to
+    /// the existing console+file output -- the GUI's toast/history hook.
+    pub fn set_on_alert(&self, cb: impl Fn(&Alert) + Send + Sync + 'static) {
+        *self.on_alert.lock().unwrap() = Some(Box::new(cb));
+    }
+
     pub fn emit(&self, a: Alert) {
+        if let Some(cb) = self.on_alert.lock().unwrap().as_ref() {
+            cb(&a);
+        }
         let _guard = self.lock.lock().unwrap();
         let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
         let color = match a.level {

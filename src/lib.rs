@@ -1,5 +1,7 @@
 pub mod alert;
 pub mod config;
+#[cfg(feature = "gui")]
+pub mod gui;
 pub mod heuristics;
 pub mod watch_file;
 pub mod watch_network;

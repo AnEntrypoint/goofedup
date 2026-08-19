@@ -47,10 +47,34 @@ Ctrl+C to stop. Logs to `~/.goofedup/goofedup.log` (and stdout).
 ./goofedup --show-config   # print the resolved watch list and thresholds, then exit
 ```
 
+## Windows GUI (goofedup-gui.exe)
+
+For everyday use on Windows, `goofedup-gui.exe` runs the same watchers with no
+console window and a system-tray icon instead:
+
+- **Tray icon** — cyan while quiet, turns red the moment an unacknowledged
+  Critical alert lands.
+- **Toast notifications** — every Warn/Critical alert pops a native Windows
+  toast, so you don't have to be staring at a terminal to notice "we done
+  goofed."
+- **Right-click menu:**
+  - *Open Recent Alerts* — opens the alert history (level, evidence,
+    suggested action) in Notepad and clears the red-icon flag.
+  - *Show Config* — opens the resolved watch list/thresholds in Notepad.
+  - *Start with Windows* — toggles launch-at-login via the per-user registry
+    Run key (no admin rights needed).
+  - *Quit* — stops every watcher thread cleanly and exits.
+- Launching a second copy while one is already running just exits — no
+  duplicate watchers.
+
+Download `goofedup-gui.exe` from the [latest release](https://github.com/AnEntrypoint/goofedup/releases/latest)
+alongside the CLI binary, or build it yourself (see below).
+
 ## Build from source
 
 ```sh
-cargo build --release
+cargo build --release                          # CLI binary (goofedup)
+cargo build --release --features gui --bin goofedup-gui   # Windows tray GUI
 ```
 
 ## Test
