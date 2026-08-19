@@ -9,7 +9,18 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+
+/// Every lock in this module guards a plain data structure (an Option, a
+/// unit "are we mid-write" token) with no user code running while it is
+/// held, except the registered GUI callback in `emit` -- if that callback
+/// ever panicked it must not take every future alert down with it via a
+/// poisoned mutex, since a dropped notification is a real, named degraded
+/// behavior but a watcher thread that can no longer emit alerts at all is
+/// the actual failure this tool exists to catch.
+fn lock_recovering<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Level {
@@ -54,14 +65,14 @@ impl AlertSink {
     /// Registers a callback invoked with every emitted Alert, in addition to
     /// the existing console+file output -- the GUI's toast/history hook.
     pub fn set_on_alert(&self, cb: impl Fn(&Alert) + Send + Sync + 'static) {
-        *self.on_alert.lock().unwrap() = Some(Box::new(cb));
+        *lock_recovering(&self.on_alert) = Some(Box::new(cb));
     }
 
     pub fn emit(&self, a: Alert) {
-        if let Some(cb) = self.on_alert.lock().unwrap().as_ref() {
+        if let Some(cb) = lock_recovering(&self.on_alert).as_ref() {
             cb(&a);
         }
-        let _guard = self.lock.lock().unwrap();
+        let _guard = lock_recovering(&self.lock);
         let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
         let color = match a.level {
             Level::Critical => "\x1b[31m",

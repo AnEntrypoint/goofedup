@@ -63,14 +63,35 @@ fn main() {
     let autostart_id = autostart_item.id().clone();
     let quit_id = quit.id().clone();
 
-    let mut tray = Some(
-        TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_icon(icon::render(false))
-            .with_tooltip("goofedup -- alert-only, nothing killed/deleted/blocked automatically")
-            .build()
-            .expect("failed to build tray icon"),
-    );
+    let Some(idle_icon) = icon::render(false) else {
+        alerts.critical(
+            "goofedup-gui",
+            "tray icon render failed at startup -- running watchers with no tray shell",
+            "icon::render returned None",
+            None,
+        );
+        run_watchers_headless(running);
+        return;
+    };
+
+    let mut tray = match TrayIconBuilder::new()
+        .with_menu(Box::new(menu))
+        .with_icon(idle_icon)
+        .with_tooltip("goofedup -- alert-only, nothing killed/deleted/blocked automatically")
+        .build()
+    {
+        Ok(t) => Some(t),
+        Err(e) => {
+            alerts.critical(
+                "goofedup-gui",
+                "tray icon build failed at startup -- running watchers with no tray shell",
+                e.to_string(),
+                None,
+            );
+            run_watchers_headless(running);
+            return;
+        }
+    };
 
     let menu_channel = MenuEvent::receiver();
     let running_for_loop = running.clone();
@@ -83,8 +104,8 @@ fn main() {
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == open_log_id {
                 history.clear_critical_flag();
-                if let Some(t) = tray.as_mut() {
-                    let _ = t.set_icon(Some(icon::render(false)));
+                if let (Some(t), Some(icon)) = (tray.as_mut(), icon::render(false)) {
+                    let _ = t.set_icon(Some(icon));
                 }
                 alert_window::show(&history.render_text());
             } else if event.id == show_config_id {
@@ -104,11 +125,17 @@ fn main() {
         }
 
         if history.has_unacknowledged_critical() {
-            if let Some(t) = tray.as_mut() {
-                let _ = t.set_icon(Some(icon::render(true)));
+            if let (Some(t), Some(icon)) = (tray.as_mut(), icon::render(true)) {
+                let _ = t.set_icon(Some(icon));
             }
         }
     });
+}
+
+fn run_watchers_headless(running: Arc<AtomicBool>) {
+    while running.load(Ordering::Relaxed) {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 fn autostart_label() -> String {

@@ -2,7 +2,7 @@
 // window -- newest first, capped so a noisy session can't grow unbounded.
 
 use crate::alert::{Alert, Level};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 const CAP: usize = 200;
 
@@ -19,6 +19,17 @@ pub struct History {
     entries: Mutex<Vec<Entry>>,
 }
 
+/// The only critical sections held on this mutex are plain Vec
+/// operations with no user code that can panic mid-lock, so a poison can
+/// only happen from an unrelated crash elsewhere in the process -- in
+/// that case the alert history is best-effort observability, not a
+/// correctness-critical store, so recovering the guard and continuing is
+/// the correct degraded behavior rather than cascading the panic into
+/// every future history read/write.
+fn lock_recovering<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl History {
     pub fn new() -> Self {
         Self {
@@ -27,7 +38,7 @@ impl History {
     }
 
     pub fn push(&self, a: &Alert) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = lock_recovering(&self.entries);
         entries.insert(
             0,
             Entry {
@@ -43,9 +54,7 @@ impl History {
     }
 
     pub fn has_unacknowledged_critical(&self) -> bool {
-        self.entries
-            .lock()
-            .unwrap()
+        lock_recovering(&self.entries)
             .iter()
             .any(|e| e.level == Level::Critical)
     }
@@ -53,7 +62,7 @@ impl History {
     pub fn clear_critical_flag(&self) {
         // Acknowledgement drops severity to Warn in the retained view so the
         // tray icon reverts without discarding history.
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = lock_recovering(&self.entries);
         for e in entries.iter_mut() {
             if e.level == Level::Critical {
                 e.level = Level::Warn;
@@ -62,7 +71,7 @@ impl History {
     }
 
     pub fn render_text(&self) -> String {
-        let entries = self.entries.lock().unwrap();
+        let entries = lock_recovering(&self.entries);
         if entries.is_empty() {
             return "No alerts yet.".to_string();
         }

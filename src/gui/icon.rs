@@ -7,7 +7,7 @@ use tray_icon::Icon;
 
 const SIZE: u32 = 32;
 
-pub fn render(critical_pending: bool) -> Icon {
+pub fn render(critical_pending: bool) -> Option<Icon> {
     let (r, g, b) = if critical_pending {
         (220u8, 38, 38)
     } else {
@@ -32,5 +32,5 @@ pub fn render(critical_pending: bool) -> Icon {
         }
     }
 
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("valid tray icon buffer")
+    Icon::from_rgba(rgba, SIZE, SIZE).ok()
 }

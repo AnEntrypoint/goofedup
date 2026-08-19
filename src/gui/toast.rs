@@ -23,7 +23,9 @@ pub fn show(title: &str, body: &str) {
         xml_escape(body)
     );
 
-    let doc = XmlDocument::new().expect("XmlDocument::new");
+    let Ok(doc) = XmlDocument::new() else {
+        return;
+    };
     if doc.LoadXml(&HSTRING::from(xml.as_str())).is_err() {
         return;
     }
