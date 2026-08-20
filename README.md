@@ -66,10 +66,12 @@ console window and a system-tray icon instead:
   toast; **click the toast itself** to open the alert history directly,
   instead of just dismissing it.
 - **Right-click menu:**
-  - *Open Recent Alerts* — opens a readable alert history (summary counts up
-    top, newest first, level/evidence/suggested action per entry) and clears
+  - *Open Recent Alerts* — opens a native alert history window (a list with
+    severity-colored rows — red for Critical, amber for Warn — plus a details
+    pane showing evidence/suggested action for the selected entry) and clears
     the red-icon flag.
-  - *Show Config* — opens the resolved watch list/thresholds.
+  - *Show Config* — opens the resolved watch list/thresholds as a sectioned
+    list with bold group headers, grouped by category.
   - *Pause Alerts* — a checkable item that silences new alerts on demand
     (the tray icon goes gray, the tooltip says PAUSED) without killing the
     app or its watcher threads, for known maintenance windows.
