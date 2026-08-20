@@ -14,7 +14,7 @@ pub enum IconState {
     Critical,
 }
 
-pub fn render(state: IconState) -> Option<Icon> {
+fn shield_rgba(state: &IconState) -> Vec<u8> {
     let (r, g, b) = match state {
         IconState::Critical => (220u8, 38, 38),
         IconState::Paused => (120u8, 120, 120),
@@ -40,7 +40,75 @@ pub fn render(state: IconState) -> Option<Icon> {
         }
     }
 
+    rgba
+}
+
+pub fn render(state: IconState) -> Option<Icon> {
+    let rgba = shield_rgba(&state);
     Icon::from_rgba(rgba, SIZE, SIZE).ok()
+}
+
+#[cfg(windows)]
+pub fn shield_hicon(state: IconState) -> Option<windows::Win32::UI::WindowsAndMessaging::HICON> {
+    use windows::Win32::Graphics::Gdi::{
+        CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        DIB_RGB_COLORS, HDC,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
+
+    let rgba = shield_rgba(&state);
+    let mut bgra = vec![0u8; rgba.len()];
+    for px in 0..(SIZE * SIZE) as usize {
+        let i = px * 4;
+        bgra[i] = rgba[i + 2];
+        bgra[i + 1] = rgba[i + 1];
+        bgra[i + 2] = rgba[i];
+        bgra[i + 3] = rgba[i + 3];
+    }
+
+    unsafe {
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: SIZE as i32,
+                biHeight: -(SIZE as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0 as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+        let Ok(color_bitmap) =
+            CreateDIBSection(HDC::default(), &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)
+        else {
+            return None;
+        };
+        if color_bitmap.is_invalid() || bits_ptr.is_null() {
+            return None;
+        }
+        std::ptr::copy_nonoverlapping(bgra.as_ptr(), bits_ptr as *mut u8, bgra.len());
+
+        let mask_bits = vec![0u8; ((SIZE + 7) / 8 * SIZE) as usize];
+        let mask_bitmap = CreateBitmap(SIZE as i32, SIZE as i32, 1, 1, Some(mask_bits.as_ptr() as *const core::ffi::c_void));
+        if mask_bitmap.is_invalid() {
+            let _ = DeleteObject(color_bitmap);
+            return None;
+        }
+
+        let icon_info = ICONINFO {
+            fIcon: true.into(),
+            xHotspot: 0,
+            yHotspot: 0,
+            hbmMask: mask_bitmap,
+            hbmColor: color_bitmap,
+        };
+        let hicon = CreateIconIndirect(&icon_info);
+        let _ = DeleteObject(color_bitmap);
+        let _ = DeleteObject(mask_bitmap);
+        hicon.ok()
+    }
 }
 
 /// Antialiased coverage (0.0..=1.0) of a shield silhouette at normalized

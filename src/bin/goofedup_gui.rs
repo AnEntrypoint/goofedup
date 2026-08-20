@@ -126,21 +126,21 @@ fn main() {
         if let Ok(event) = tray_channel.try_recv() {
             if matches!(event, TrayIconEvent::DoubleClick { .. }) {
                 history.clear_critical_flag();
-                open_alert_window(&alerts, "goofedup -- Recent Alerts", &history.render_text());
+                open_alert_window(&alerts, "goofedup -- Recent Alerts", &history);
             }
         }
 
         if OPEN_HISTORY_REQUESTED.swap(false, Ordering::Relaxed) {
             history.clear_critical_flag();
-            open_alert_window(&alerts, "goofedup -- Recent Alerts", &history.render_text());
+            open_alert_window(&alerts, "goofedup -- Recent Alerts", &history);
         }
 
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == open_log_id {
                 history.clear_critical_flag();
-                open_alert_window(&alerts, "goofedup -- Recent Alerts", &history.render_text());
+                open_alert_window(&alerts, "goofedup -- Recent Alerts", &history);
             } else if event.id == show_config_id {
-                open_alert_window(&alerts, "goofedup -- Config", &render_config(&cfg));
+                open_config_window(&alerts, "goofedup -- Config", &cfg);
             } else if event.id == pause_id {
                 let now_paused = pause_item.is_checked();
                 alerting_enabled.store(!now_paused, Ordering::Relaxed);
@@ -233,11 +233,22 @@ fn tooltip_text(history: &History, paused: bool) -> String {
     }
 }
 
-fn open_alert_window(alerts: &AlertSink, title: &str, text: &str) {
-    if let Err(reason) = alert_window::show(title, text) {
+fn open_alert_window(alerts: &AlertSink, title: &str, history: &History) {
+    if let Err(reason) = alert_window::show_alerts(title, &history.entries_snapshot()) {
         alerts.critical(
             "goofedup-gui",
-            "could not open the alert/config viewer",
+            "could not open the alert viewer",
+            reason,
+            None,
+        );
+    }
+}
+
+fn open_config_window(alerts: &AlertSink, title: &str, cfg: &Config) {
+    if let Err(reason) = alert_window::show_config(title, &config_sections(cfg)) {
+        alerts.critical(
+            "goofedup-gui",
+            "could not open the config viewer",
             reason,
             None,
         );
@@ -250,35 +261,60 @@ fn run_watchers_headless(running: Arc<AtomicBool>) {
     }
 }
 
-fn render_config(cfg: &Config) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("goofedup config for {}\n", std::env::consts::OS));
-    out.push_str(&format!("log path: {}\n\n", cfg.log_path.display()));
-    out.push_str("bootstrap watch:\n");
-    for e in &cfg.bootstrap_watch {
-        out.push_str(&format!(
-            "  {} (must contain '{}') > {} bytes\n",
-            e.search_root.join(e.file_name).display(),
-            e.path_must_contain,
-            e.max_bytes
-        ));
-    }
-    out.push_str("\nbackup-sibling roots:\n");
-    for r in &cfg.backup_sibling_roots {
-        out.push_str(&format!("  {}\n", r.display()));
-    }
-    out.push_str(&format!("\nwatched interpreters: {}\n", cfg.watched_interpreters.join(", ")));
-    out.push_str(&format!("\ndenied exec path fragments: {}\n", cfg.deny_exec_path_fragments.join(", ")));
-    out.push_str("\nallowed exec roots:\n");
-    for r in &cfg.allowed_exec_roots {
-        out.push_str(&format!("  {}\n", r.display()));
-    }
-    out.push_str(&format!(
-        "\nnetwork scan thresholds: {}+ distinct ports OR {}+ distinct hosts within {}s\n",
-        cfg.scan_distinct_ports_threshold, cfg.scan_distinct_hosts_threshold, cfg.scan_window_secs
-    ));
-    out.push_str(&format!("poll interval: {}s\n", cfg.poll_interval_secs));
-    out
+fn config_sections(cfg: &Config) -> Vec<(&'static str, Vec<(String, String)>)> {
+    vec![
+        (
+            "General",
+            vec![
+                ("Platform".to_string(), std::env::consts::OS.to_string()),
+                ("Log path".to_string(), cfg.log_path.display().to_string()),
+                ("Poll interval".to_string(), format!("{}s", cfg.poll_interval_secs)),
+            ],
+        ),
+        (
+            "Bootstrap Watch",
+            cfg.bootstrap_watch
+                .iter()
+                .map(|e| {
+                    (
+                        e.search_root.join(e.file_name).display().to_string(),
+                        format!("must contain '{}', > {} bytes", e.path_must_contain, e.max_bytes),
+                    )
+                })
+                .collect(),
+        ),
+        (
+            "Backup-Sibling Roots",
+            cfg.backup_sibling_roots
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (format!("Root {}", i + 1), r.display().to_string()))
+                .collect(),
+        ),
+        (
+            "Process Detection",
+            vec![
+                ("Watched interpreters".to_string(), cfg.watched_interpreters.join(", ")),
+                ("Denied exec path fragments".to_string(), cfg.deny_exec_path_fragments.join(", ")),
+            ],
+        ),
+        (
+            "Allowed Exec Roots",
+            cfg.allowed_exec_roots
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (format!("Root {}", i + 1), r.display().to_string()))
+                .collect(),
+        ),
+        (
+            "Network Scan Thresholds",
+            vec![
+                ("Distinct ports".to_string(), format!("{}+", cfg.scan_distinct_ports_threshold)),
+                ("Distinct hosts".to_string(), format!("{}+", cfg.scan_distinct_hosts_threshold)),
+                ("Window".to_string(), format!("{}s", cfg.scan_window_secs)),
+            ],
+        ),
+    ]
 }
 
 fn spawn_watchers(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {

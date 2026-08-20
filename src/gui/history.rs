@@ -15,6 +15,16 @@ pub struct Entry {
     pub suggested_action: Option<String>,
 }
 
+#[derive(Clone)]
+pub struct EntrySnapshot {
+    pub ts: String,
+    pub level: Level,
+    pub category: &'static str,
+    pub message: String,
+    pub evidence: Option<String>,
+    pub suggested_action: Option<String>,
+}
+
 pub struct History {
     entries: Mutex<Vec<Entry>>,
 }
@@ -81,33 +91,17 @@ impl History {
         }
     }
 
-    pub fn render_text(&self) -> String {
-        let entries = lock_recovering(&self.entries);
-        if entries.is_empty() {
-            return "goofedup -- no alerts yet. Everything looks normal.".to_string();
-        }
-
-        let critical = entries.iter().filter(|e| e.level == Level::Critical).count();
-        let warn = entries.iter().filter(|e| e.level == Level::Warn).count();
-        let info = entries.iter().filter(|e| e.level == Level::Info).count();
-
-        let mut out = String::new();
-        out.push_str(&format!(
-            "goofedup alert history -- {} critical, {} warning, {} info (newest first)\n",
-            critical, warn, info
-        ));
-        out.push_str(&"=".repeat(70));
-        out.push('\n');
-        for e in entries.iter() {
-            out.push('\n');
-            out.push_str(&format!("[{}] {:<8} {:<20} {}\n", e.ts, e.level.to_string(), e.category, e.message));
-            if let Some(ev) = &e.evidence {
-                out.push_str(&format!("    evidence: {ev}\n"));
-            }
-            if let Some(action) = &e.suggested_action {
-                out.push_str(&format!("    suggested action: {action}\n"));
-            }
-        }
-        out
+    pub fn entries_snapshot(&self) -> Vec<EntrySnapshot> {
+        lock_recovering(&self.entries)
+            .iter()
+            .map(|e| EntrySnapshot {
+                ts: e.ts.clone(),
+                level: e.level,
+                category: e.category,
+                message: e.message.clone(),
+                evidence: e.evidence.clone(),
+                suggested_action: e.suggested_action.clone(),
+            })
+            .collect()
     }
 }
