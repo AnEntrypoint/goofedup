@@ -126,21 +126,21 @@ fn main() {
         if let Ok(event) = tray_channel.try_recv() {
             if matches!(event, TrayIconEvent::DoubleClick { .. }) {
                 history.clear_critical_flag();
-                alert_window::show(&history.render_text());
+                open_alert_window(&alerts, &history.render_text());
             }
         }
 
         if OPEN_HISTORY_REQUESTED.swap(false, Ordering::Relaxed) {
             history.clear_critical_flag();
-            alert_window::show(&history.render_text());
+            open_alert_window(&alerts, &history.render_text());
         }
 
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == open_log_id {
                 history.clear_critical_flag();
-                alert_window::show(&history.render_text());
+                open_alert_window(&alerts, &history.render_text());
             } else if event.id == show_config_id {
-                alert_window::show(&render_config(&cfg));
+                open_alert_window(&alerts, &render_config(&cfg));
             } else if event.id == pause_id {
                 let now_paused = pause_item.is_checked();
                 alerting_enabled.store(!now_paused, Ordering::Relaxed);
@@ -149,10 +149,22 @@ fn main() {
                     if now_paused { "alerting paused by user" } else { "alerting resumed by user" },
                 );
             } else if event.id == autostart_id {
-                if autostart_item.is_checked() {
-                    autostart::enable();
+                let ok = if autostart_item.is_checked() {
+                    autostart::enable()
                 } else {
-                    autostart::disable();
+                    autostart::disable()
+                };
+                if !ok {
+                    // Revert the checkbox to the real registry state so the
+                    // UI never shows a toggle the write didn't actually
+                    // apply, and tell the user why.
+                    autostart_item.set_checked(autostart::is_enabled());
+                    alerts.critical(
+                        "goofedup-gui",
+                        "could not update Start with Windows -- registry write to HKCU Run failed",
+                        format!("requested checked={}", autostart_item.is_checked()),
+                        Some("check whether another process holds the registry key open, or run once as the account that owns HKCU".to_string()),
+                    );
                 }
             } else if event.id == quit_id {
                 running_for_loop.store(false, Ordering::Relaxed);
@@ -218,6 +230,21 @@ fn tooltip_text(history: &History, paused: bool) -> String {
         format!("goofedup -- watching, {warn} warning(s) today")
     } else {
         "goofedup -- watching, all clear".to_string()
+    }
+}
+
+/// Opens the alert/config viewer and surfaces a real failure through the
+/// existing AlertSink -> toast pipeline instead of a silent no-op click --
+/// the same feedback channel the user already watches for every other
+/// alert, so no second notification mechanism is needed.
+fn open_alert_window(alerts: &AlertSink, text: &str) {
+    if let Err(reason) = alert_window::show(text) {
+        alerts.critical(
+            "goofedup-gui",
+            "could not open the alert/config viewer",
+            reason,
+            Some("check that notepad.exe is present and reachable on PATH, and that %TEMP% is writable".to_string()),
+        );
     }
 }
 
