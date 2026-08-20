@@ -129,10 +129,18 @@ pub fn show(title: &str, text: &str) -> Result<(), String> {
 
         let mut rect = Default::default();
         let _ = GetClientRect(hwnd, &mut rect);
+        // lpWindowName here is left empty deliberately: CreateWindowExW's
+        // own window-text parameter has a much tighter internal length
+        // limit than WM_SETTEXT/SetWindowTextW does, so a long real alert
+        // history (attacker-influenceable process names/paths/cmdlines,
+        // unbounded in the adversarial case even though History caps entry
+        // count) can fail window creation outright if passed here. The
+        // real text is set afterward via SetWindowTextW, which has no such
+        // limit for a multiline edit control.
         let edit_hwnd = CreateWindowExW(
             WS_EX_CLIENTEDGE,
             WC_EDITW,
-            &HSTRING::from(text.as_str()),
+            &HSTRING::from(""),
             WS_CHILD | WS_VISIBLE | WS_BORDER | WS_VSCROLL | WS_HSCROLL
                 | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(ES_MULTILINE as u32)
                 | windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(ES_READONLY as u32)
@@ -151,6 +159,11 @@ pub fn show(title: &str, text: &str) -> Result<(), String> {
             let _ = DestroyWindow(hwnd);
             return;
         };
+        if SetWindowTextW(edit_hwnd, &HSTRING::from(text.as_str())).is_err() {
+            let _ = tx.send(Err("SetWindowTextW failed to set the alert text into the edit control".to_string()));
+            let _ = DestroyWindow(hwnd);
+            return;
+        }
 
         // Segoe UI at a readable size instead of the tiny default system
         // font -- the user's "super user friendly" bar means legible text,
