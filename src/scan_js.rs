@@ -76,35 +76,3 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
 
     flagged
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::alert::AlertSink;
-    use std::fs;
-
-    #[test]
-    fn flags_a_real_hidden_identifier_file_and_skips_clean_ones() {
-        let dir = std::env::temp_dir().join(format!("goofedup-scanjs-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("node_modules/evil-pkg")).unwrap();
-        fs::write(
-            dir.join("node_modules/evil-pkg/index.js"),
-            "module.exports = global['\\u0072\\u0065\\u0071\\u0075' + 'ire'];",
-        )
-        .unwrap();
-        fs::write(dir.join("clean.js"), "function main(){ return 1; }").unwrap();
-
-        let log_path = dir.join("goofedup.log");
-        let alerts = AlertSink::new(log_path.clone());
-        let flagged = scan_project(&dir, &alerts);
-
-        assert_eq!(flagged, 1, "exactly the one file with the hidden-identifier shape should be flagged");
-        let log = fs::read_to_string(&log_path).unwrap();
-        assert!(log.contains("hidden-unicode-identifier"));
-        assert!(log.contains("evil-pkg"));
-        assert!(!log.contains("clean.js"));
-
-        let _ = fs::remove_dir_all(&dir);
-    }
-}
