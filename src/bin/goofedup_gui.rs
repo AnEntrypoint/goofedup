@@ -126,21 +126,21 @@ fn main() {
         if let Ok(event) = tray_channel.try_recv() {
             if matches!(event, TrayIconEvent::DoubleClick { .. }) {
                 history.clear_critical_flag();
-                open_alert_window(&alerts, &history.render_text());
+                open_alert_window(&alerts, "goofedup -- Recent Alerts", &history.render_text());
             }
         }
 
         if OPEN_HISTORY_REQUESTED.swap(false, Ordering::Relaxed) {
             history.clear_critical_flag();
-            open_alert_window(&alerts, &history.render_text());
+            open_alert_window(&alerts, "goofedup -- Recent Alerts", &history.render_text());
         }
 
         if let Ok(event) = menu_channel.try_recv() {
             if event.id == open_log_id {
                 history.clear_critical_flag();
-                open_alert_window(&alerts, &history.render_text());
+                open_alert_window(&alerts, "goofedup -- Recent Alerts", &history.render_text());
             } else if event.id == show_config_id {
-                open_alert_window(&alerts, &render_config(&cfg));
+                open_alert_window(&alerts, "goofedup -- Config", &render_config(&cfg));
             } else if event.id == pause_id {
                 let now_paused = pause_item.is_checked();
                 alerting_enabled.store(!now_paused, Ordering::Relaxed);
@@ -237,13 +237,13 @@ fn tooltip_text(history: &History, paused: bool) -> String {
 /// existing AlertSink -> toast pipeline instead of a silent no-op click --
 /// the same feedback channel the user already watches for every other
 /// alert, so no second notification mechanism is needed.
-fn open_alert_window(alerts: &AlertSink, text: &str) {
-    if let Err(reason) = alert_window::show(text) {
+fn open_alert_window(alerts: &AlertSink, title: &str, text: &str) {
+    if let Err(reason) = alert_window::show(title, text) {
         alerts.critical(
             "goofedup-gui",
             "could not open the alert/config viewer",
             reason,
-            Some("check that notepad.exe is present and reachable on PATH, and that %TEMP% is writable".to_string()),
+            None,
         );
     }
 }
