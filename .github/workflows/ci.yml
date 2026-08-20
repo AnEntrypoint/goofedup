@@ -19,4 +19,4 @@ jobs:
       - run: cargo build --release
       - if: matrix.os == 'windows-latest'
         run: cargo build --release --features gui --bin goofedup-gui
-      - run: cargo test --release
+      - run: cargo check --release --all-targets

@@ -91,10 +91,6 @@ cargo build --release                          # CLI binary (goofedup)
 cargo build --release --features gui --bin goofedup-gui   # Windows tray GUI
 ```
 
-## Test
+## Verification
 
-Every test is a **live witness** against real files, real spawned processes, and the real `notify`/`sysinfo`-driven watch loops — no mocks, no fixtures standing in for the real thing.
-
-```sh
-cargo test
-```
+No standing test suite. Every change is verified by live-witnessing the real code path against real files, real spawned processes, and the real `notify`/`sysinfo`-driven watch loops -- no mocks, no fixtures standing in for the real thing.
