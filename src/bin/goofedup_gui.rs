@@ -233,10 +233,6 @@ fn tooltip_text(history: &History, paused: bool) -> String {
     }
 }
 
-/// Opens the alert/config viewer and surfaces a real failure through the
-/// existing AlertSink -> toast pipeline instead of a silent no-op click --
-/// the same feedback channel the user already watches for every other
-/// alert, so no second notification mechanism is needed.
 fn open_alert_window(alerts: &AlertSink, title: &str, text: &str) {
     if let Err(reason) = alert_window::show(title, text) {
         alerts.critical(
