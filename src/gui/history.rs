@@ -12,7 +12,6 @@ pub struct Entry {
     pub category: &'static str,
     pub message: String,
     pub evidence: Option<String>,
-    pub suggested_action: Option<String>,
 }
 
 #[derive(Clone)]
@@ -22,7 +21,6 @@ pub struct EntrySnapshot {
     pub category: &'static str,
     pub message: String,
     pub evidence: Option<String>,
-    pub suggested_action: Option<String>,
 }
 
 pub struct History {
@@ -57,7 +55,6 @@ impl History {
                 category: a.category,
                 message: a.message.clone(),
                 evidence: a.evidence.clone(),
-                suggested_action: a.suggested_action.clone(),
             },
         );
         entries.truncate(CAP);
@@ -100,7 +97,6 @@ impl History {
                 category: e.category,
                 message: e.message.clone(),
                 evidence: e.evidence.clone(),
-                suggested_action: e.suggested_action.clone(),
             })
             .collect()
     }

@@ -25,6 +25,16 @@ struct ReadTracker {
     /// re-flagged as a fresh burst on the very next poll.
     avg_delta: f64,
     alerted_this_burst: bool,
+    /// Consecutive polls (excluding the current one) that already scored as
+    /// a relative spike. A real drive-scanning/harvesting process sustains
+    /// its elevated read rate poll after poll; a legitimate app's burst
+    /// (a page load, a cache write, an update check) is characteristically
+    /// one-shot. Live-witnessed false positives (firefox.exe, Discord.exe)
+    /// were both single-poll spikes against a baseline the app itself had
+    /// only just gone quiet enough to shrink -- requiring persistence
+    /// eliminates that shape while a genuine sustained scan still trips
+    /// this within a couple of poll intervals.
+    consecutive_relative_spikes: u32,
 }
 
 pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
@@ -45,6 +55,7 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     );
 
     let mut read_trackers: HashMap<Pid, ReadTracker> = HashMap::new();
+    let mut warned_unlisted_paths: HashSet<String> = HashSet::new();
 
     // A fresh System::new_all() is built EVERY poll cycle rather than reused
     // via refresh_processes on one long-lived instance -- a real bug hit and
@@ -71,7 +82,7 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
         let current: HashSet<Pid> = sys.processes().keys().copied().collect();
         for pid in current.difference(&known) {
             if let Some(p) = sys.process(*pid) {
-                inspect_new_process(&cfg, &alerts, p);
+                inspect_new_process(&cfg, &alerts, p, &mut warned_unlisted_paths);
             }
         }
 
@@ -136,6 +147,7 @@ fn check_read_burst(
         last_total_read: total_read,
         avg_delta: 0.0,
         alerted_this_burst: false,
+        consecutive_relative_spikes: 0,
     });
 
     // A process's disk_usage() can wrap or reset (e.g. genuinely restarted
@@ -147,28 +159,52 @@ fn check_read_burst(
 
     if delta == 0 {
         tracker.alerted_this_burst = false;
+        tracker.consecutive_relative_spikes = 0;
         return;
     }
 
     let is_absolute_burst = delta >= cfg.file_read_burst_absolute_bytes_per_poll;
-    let is_relative_spike = tracker.avg_delta > 1024.0 * 64.0 // require a real established baseline first, not "0 -> anything" on process 2
+
+    // A live-witnessed false-positive source: a low EMA baseline built up
+    // during a genuinely quiet stretch (an idle browser tab) makes any
+    // ordinary burst of real activity look like a huge relative spike.
+    // BASELINE_WARM_UP_FLOOR requires the baseline itself to already
+    // reflect a meaningful amount of steady-state activity before the
+    // relative check even engages, not just "greater than noise."
+    const BASELINE_WARM_UP_FLOOR: f64 = 512.0 * 1024.0;
+    let single_poll_relative_spike = tracker.avg_delta > BASELINE_WARM_UP_FLOOR
         && (delta as f64) >= tracker.avg_delta * cfg.file_read_burst_relative_multiplier;
+
+    if single_poll_relative_spike {
+        tracker.consecutive_relative_spikes += 1;
+    } else {
+        tracker.consecutive_relative_spikes = 0;
+    }
+
+    // A real drive-scanning/harvesting process sustains its elevated read
+    // rate; a legitimate app's burst (page load, cache write, update check)
+    // is characteristically one-shot. Requiring the spike to repeat on the
+    // very next poll too -- not a single sample -- is what actually
+    // distinguishes the two shapes, live-witnessed against real recorded
+    // firefox.exe/Discord.exe false positives (both single-poll spikes).
+    const REQUIRED_CONSECUTIVE_SPIKES: u32 = 2;
+    let is_relative_spike = tracker.consecutive_relative_spikes >= REQUIRED_CONSECUTIVE_SPIKES;
 
     if (is_absolute_burst || is_relative_spike) && !tracker.alerted_this_burst {
         tracker.alerted_this_burst = true;
         let name = p.name().to_string_lossy().to_string();
         let exe_path = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
         let reason = if is_absolute_burst && is_relative_spike {
-            "both an absolute burst and a spike versus its own baseline"
+            "both an absolute burst and a sustained spike versus its own baseline"
         } else if is_absolute_burst {
             "an absolute burst"
         } else {
-            "a spike versus its own recent baseline"
+            "a sustained spike versus its own recent baseline"
         };
         alerts.critical(
             "file-read-burst",
             format!(
-                "'{name}' (PID {}) read an unusual amount of file data in one poll interval -- {reason}, the tell-tale shape of drive scanning/harvesting",
+                "'{name}' (PID {}) read an unusual amount of file data -- {reason}, the tell-tale shape of drive scanning/harvesting",
                 pid.as_u32()
             ),
             format!(
@@ -178,7 +214,6 @@ fn check_read_burst(
                 format_bytes(tracker.avg_delta as u64),
                 if exe_path.is_empty() { String::new() } else { format!(", exe={exe_path}") }
             ),
-            Some(suggest_kill(pid.as_u32())),
         );
     } else if !is_absolute_burst && !is_relative_spike {
         tracker.alerted_this_burst = false;
@@ -186,14 +221,24 @@ fn check_read_burst(
 
     // EMA update AFTER scoring this poll -- a burst this poll must be
     // compared against the baseline BEFORE the burst itself pulls the
-    // average up, otherwise a sustained scan would only ever spike the
-    // average and never trip the relative check past its first poll.
+    // average up. A poll that itself scored as a spike (single-poll or
+    // absolute) is excluded from the update entirely, not just deferred:
+    // otherwise a SUSTAINED scan launders its own elevated read rate into
+    // the baseline within 1-2 polls (live-witnessed: a real 3.6MB burst
+    // pulled a ~150KB baseline up to ~700KB in two polls, so a second
+    // identical 3.6MB burst right after no longer cleared the relative
+    // threshold against its own inflated average) -- the baseline must stay
+    // anchored to genuine steady-state activity for as long as the scan
+    // itself continues, or a sustained scan becomes progressively HARDER to
+    // detect the longer it runs, the opposite of the intended behavior.
     const EMA_ALPHA: f64 = 0.2;
-    tracker.avg_delta = if tracker.avg_delta == 0.0 {
-        delta as f64
-    } else {
-        EMA_ALPHA * (delta as f64) + (1.0 - EMA_ALPHA) * tracker.avg_delta
-    };
+    if !single_poll_relative_spike && !is_absolute_burst {
+        tracker.avg_delta = if tracker.avg_delta == 0.0 {
+            delta as f64
+        } else {
+            EMA_ALPHA * (delta as f64) + (1.0 - EMA_ALPHA) * tracker.avg_delta
+        };
+    }
 }
 
 fn format_bytes(b: u64) -> String {
@@ -211,7 +256,12 @@ fn format_bytes(b: u64) -> String {
     }
 }
 
-fn inspect_new_process(cfg: &Config, alerts: &AlertSink, p: &sysinfo::Process) {
+fn inspect_new_process(
+    cfg: &Config,
+    alerts: &AlertSink,
+    p: &sysinfo::Process,
+    warned_unlisted_paths: &mut HashSet<String>,
+) {
     let name = p.name().to_string_lossy().to_string();
     let exe_path = p
         .exe()
@@ -232,14 +282,26 @@ fn inspect_new_process(cfg: &Config, alerts: &AlertSink, p: &sysinfo::Process) {
                 "process-path",
                 format!("'{name}' (PID {pid}) is executing from a location nothing legitimate runs from"),
                 format!("exe={exe_path} ({reason})"),
-                Some(suggest_kill(pid)),
             );
         } else if is_unlisted_exec_path(&exe_path, &cfg.allowed_exec_roots) {
-            alerts.warn(
-                "process-path",
-                format!("'{name}' (PID {pid}) is running from a path outside the known-good allowlist"),
-                format!("exe={exe_path}"),
-            );
+            // The allowlist check itself stays exactly as sensitive as
+            // before -- a system-wide install location or a user's own
+            // tooling directory can still hold a compromised binary, so
+            // WHICH paths get flagged never changes here. What changes is
+            // re-alert volume: the SAME already-flagged path launching
+            // again (e.g. a system Python interpreter invoked many times a
+            // day) is not new information the second time, so it alerts
+            // once per exact exe path per session run rather than once per
+            // process launch. In-memory only -- a fresh session still
+            // re-flags every path from scratch, since a path's trust
+            // status could genuinely have changed since last run.
+            if warned_unlisted_paths.insert(exe_path.clone()) {
+                alerts.warn(
+                    "process-path",
+                    format!("'{name}' (PID {pid}) is running from a path outside the known-good allowlist"),
+                    format!("exe={exe_path}"),
+                );
+            }
         }
     }
 
@@ -249,7 +311,6 @@ fn inspect_new_process(cfg: &Config, alerts: &AlertSink, p: &sysinfo::Process) {
             "process-name",
             format!("'{name}' (PID {pid}) name looks suspicious"),
             format!("score={} reasons=[{}]", v.score, v.reasons.join("; ")),
-            Some(suggest_kill(pid)),
         );
     }
 
@@ -280,18 +341,7 @@ fn inspect_new_process(cfg: &Config, alerts: &AlertSink, p: &sysinfo::Process) {
                 "c2-shaped-process",
                 format!("'{name}' (PID {pid}) spawned with a command line shaped like an obfuscated C2 payload"),
                 format!("score={} reasons=[{}] cmdline_head={head}", v.score, v.reasons.join("; ")),
-                Some(suggest_kill(pid)),
             );
         }
     }
-}
-
-#[cfg(windows)]
-fn suggest_kill(pid: u32) -> String {
-    format!("taskkill /PID {pid} /F   (verify first: tasklist /FI \"PID eq {pid}\")")
-}
-
-#[cfg(not(windows))]
-fn suggest_kill(pid: u32) -> String {
-    format!("kill -9 {pid}   (verify first: ps -p {pid} -o comm=,args=)")
 }

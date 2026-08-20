@@ -61,10 +61,6 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
                     path.display()
                 ),
                 v.reasons.join("; "),
-                Some(format!(
-                    "read the flagged region by hand before trusting this file: {}",
-                    path.display()
-                )),
             );
         }
     }

@@ -80,39 +80,13 @@ fn inspect_new_entry(cfg: &Config, alerts: &AlertSink, entry: &PersistenceEntry)
     );
 
     if level_critical {
-        alerts.critical(
-            "persistence-new",
-            message,
-            evidence,
-            Some(suggest_review(entry)),
-        );
+        alerts.critical("persistence-new", message, evidence);
     } else {
         // Any new persistence registration is worth a human glance even
         // without a matched heuristic -- most are legitimate installs, but
         // this is exactly the surface a quiet implant abuses, so it stays
         // WARN rather than silent.
         alerts.warn("persistence-new", message, evidence);
-    }
-}
-
-fn suggest_review(entry: &PersistenceEntry) -> String {
-    match entry.kind {
-        #[cfg(windows)]
-        "service" => format!("sc.exe qc \"{}\"   then: sc.exe delete \"{}\"", entry.name, entry.name),
-        #[cfg(windows)]
-        "scheduled-task" => format!(
-            "schtasks /Query /TN \"{}\" /V /FO LIST   then: schtasks /Delete /TN \"{}\" /F",
-            entry.name, entry.name
-        ),
-        #[cfg(windows)]
-        "login-item" => "review HKCU/HKLM ...\\CurrentVersion\\Run and remove the offending value".to_string(),
-        #[cfg(target_os = "macos")]
-        "launchd" => format!("launchctl list | grep \"{}\"   then: launchctl bootout ...", entry.name),
-        #[cfg(target_os = "linux")]
-        "systemd" => format!("systemctl status \"{}\"   then: systemctl disable --now \"{}\"", entry.name, entry.name),
-        #[cfg(target_os = "linux")]
-        "cron" => "review crontab -l / /etc/cron.d and remove the offending line".to_string(),
-        _ => "review and remove this persistence entry manually".to_string(),
     }
 }
 

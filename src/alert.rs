@@ -1,8 +1,7 @@
 // Single alert channel every detector writes through. Alert-only by design:
 // no detector in this codebase kills a process, deletes a file, or blocks a
-// connection on its own -- the strongest action any of them takes is
-// printing the exact command a human would run to do that, so a false
-// positive can never cause damage on its own.
+// connection, and none of them prescribes what to do about it either -- the
+// job here is reporting what looks suspicious, not deciding a remedy.
 
 use chrono::Local;
 use std::fmt;
@@ -44,7 +43,6 @@ pub struct Alert {
     pub category: &'static str,
     pub message: String,
     pub evidence: Option<String>,
-    pub suggested_action: Option<String>,
 }
 
 pub struct AlertSink {
@@ -93,10 +91,6 @@ impl AlertSink {
             println!("    evidence: {ev}");
             log_lines.push(format!("    evidence: {ev}"));
         }
-        if let Some(action) = &a.suggested_action {
-            println!("    suggested action: {action}");
-            log_lines.push(format!("    suggested action: {action}"));
-        }
         if let Ok(mut f) = OpenOptions::new()
             .create(true)
             .append(true)
@@ -114,7 +108,6 @@ impl AlertSink {
             category,
             message: message.into(),
             evidence: None,
-            suggested_action: None,
         });
     }
 
@@ -124,23 +117,15 @@ impl AlertSink {
             category,
             message: message.into(),
             evidence: Some(evidence.into()),
-            suggested_action: None,
         });
     }
 
-    pub fn critical(
-        &self,
-        category: &'static str,
-        message: impl Into<String>,
-        evidence: impl Into<String>,
-        suggested_action: Option<String>,
-    ) {
+    pub fn critical(&self, category: &'static str, message: impl Into<String>, evidence: impl Into<String>) {
         self.emit(Alert {
             level: Level::Critical,
             category,
             message: message.into(),
             evidence: Some(evidence.into()),
-            suggested_action,
         });
     }
 }

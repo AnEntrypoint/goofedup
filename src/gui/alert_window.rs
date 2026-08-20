@@ -48,6 +48,7 @@ const WARN_BG: (u8, u8, u8) = (255, 251, 235);
 const WARN_FG: (u8, u8, u8) = (146, 64, 14);
 const HEADER_BG: (u8, u8, u8) = (238, 242, 247);
 const HEADER_FG: (u8, u8, u8) = (30, 41, 59);
+const DESCRIPTION_FG: (u8, u8, u8) = (100, 116, 139);
 
 static REGISTER_CLASS: Once = Once::new();
 
@@ -55,6 +56,7 @@ static REGISTER_CLASS: Once = Once::new();
 enum RowKind {
     Alert(crate::alert::Level),
     SectionHeader,
+    Description,
     Plain,
 }
 
@@ -153,6 +155,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     RowKind::Alert(crate::alert::Level::Warn) => (WARN_BG, WARN_FG),
                     RowKind::Alert(_) => ((255, 255, 255), (0, 0, 0)),
                     RowKind::SectionHeader => (HEADER_BG, HEADER_FG),
+                    RowKind::Description => ((255, 255, 255), DESCRIPTION_FG),
                     RowKind::Plain => ((255, 255, 255), (0, 0, 0)),
                 };
                 let font = if matches!(kind, RowKind::SectionHeader) && !state.bold_font.is_invalid() {
@@ -544,16 +547,10 @@ fn create_alert_window_and_pump(
                 &[&e.level.to_string(), &e.ts, e.category, &e.message],
             );
             row_kinds.push(RowKind::Alert(e.level));
-            let mut detail = String::new();
-            if let Some(ev) = &e.evidence {
-                detail.push_str(&format!("Evidence: {ev}\r\n"));
-            }
-            if let Some(action) = &e.suggested_action {
-                detail.push_str(&format!("Suggested action: {action}"));
-            }
-            if detail.is_empty() {
-                detail.push_str("No further evidence or suggested action recorded.");
-            }
+            let detail = match &e.evidence {
+                Some(ev) => format!("Evidence: {ev}"),
+                None => "No further evidence recorded.".to_string(),
+            };
             details.push(detail);
         }
 
@@ -614,7 +611,7 @@ fn create_alert_window_and_pump(
 
 fn create_config_window_and_pump(
     title: &str,
-    sections: Vec<(String, Vec<(String, String)>)>,
+    sections: Vec<(String, String, Vec<(String, String)>)>,
     result_tx: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
     let hinstance = match unsafe { GetModuleHandleW(None) } {
@@ -688,10 +685,15 @@ fn create_config_window_and_pump(
 
     let mut row_kinds = Vec::new();
     let mut row = 0i32;
-    for (section, rows) in &sections {
+    for (section, description, rows) in &sections {
         insert_row(list_hwnd, row, &[section.as_str(), ""]);
         row_kinds.push(RowKind::SectionHeader);
         row += 1;
+        if !description.is_empty() {
+            insert_row(list_hwnd, row, &[description.as_str(), ""]);
+            row_kinds.push(RowKind::Description);
+            row += 1;
+        }
         for (k, v) in rows {
             insert_row(list_hwnd, row, &[k, v]);
             row_kinds.push(RowKind::Plain);
@@ -732,10 +734,12 @@ pub fn show_alerts(title: &str, entries: &[EntrySnapshot]) -> Result<(), String>
     rx.recv().unwrap_or_else(|_| Err("alert window thread exited before signaling readiness".to_string()))
 }
 
-pub fn show_config(title: &str, sections: &[(&str, Vec<(String, String)>)]) -> Result<(), String> {
+pub fn show_config(title: &str, sections: &[(&str, &str, Vec<(String, String)>)]) -> Result<(), String> {
     let title = title.to_string();
-    let sections: Vec<(String, Vec<(String, String)>)> =
-        sections.iter().map(|(name, rows)| (name.to_string(), rows.clone())).collect();
+    let sections: Vec<(String, String, Vec<(String, String)>)> = sections
+        .iter()
+        .map(|(name, description, rows)| (name.to_string(), description.to_string(), rows.clone()))
+        .collect();
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || create_config_window_and_pump(&title, sections, tx));
     rx.recv().unwrap_or_else(|_| Err("config window thread exited before signaling readiness".to_string()))

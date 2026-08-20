@@ -27,6 +27,13 @@ struct ProcWindow {
     alerted: bool,
 }
 
+/// A live-witnessed false-positive floor: ordinary browser page-loads open
+/// many same-port connections to distinct hosts (a real recorded case hit
+/// distinct_hosts=15 with distinct_ports=1). A host-count-driven alert only
+/// fires once port variety clears this floor too, since real host sweeping
+/// (scanning a subnet) commonly touches more than one or two services.
+const HOST_SWEEP_MIN_PORT_VARIETY: usize = 3;
+
 pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     alerts.info(
         "network",
@@ -66,10 +73,22 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
             w.ports.insert(c.remote_port);
             w.hosts.insert(c.remote_ip.clone());
 
-            if !w.alerted
-                && (w.ports.len() >= cfg.scan_distinct_ports_threshold
-                    || w.hosts.len() >= cfg.scan_distinct_hosts_threshold)
-            {
+            // Real port/host scanning varies both dimensions: probing many
+            // services means many distinct ports, and sweeping a subnet
+            // means many distinct hosts, usually together. Ordinary web
+            // browsing is the opposite shape -- host-diverse but port-narrow
+            // (one page load opens connections to a dozen+ CDN/ad/analytics
+            // hosts, all on port 443) -- so distinct_hosts alone, with
+            // distinct_ports still at baseline, is not scan-shaped and must
+            // not trigger on its own. A real port scan (many ports against
+            // few hosts) still triggers on the port threshold alone; a real
+            // host sweep only counts once it also shows some port variety,
+            // not just "many HTTPS connections."
+            let port_scan_shape = w.ports.len() >= cfg.scan_distinct_ports_threshold;
+            let host_sweep_shape = w.hosts.len() >= cfg.scan_distinct_hosts_threshold
+                && w.ports.len() >= HOST_SWEEP_MIN_PORT_VARIETY;
+
+            if !w.alerted && (port_scan_shape || host_sweep_shape) {
                 w.alerted = true;
                 alerts.critical(
                     "network-scan",
@@ -83,7 +102,6 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
                         w.hosts.len(),
                         cfg.scan_window_secs
                     ),
-                    Some(suggest_kill(c.pid)),
                 );
             }
 
@@ -105,16 +123,6 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
 
         windows.retain(|pid, _| conns.iter().any(|c| c.pid == *pid));
     }
-}
-
-#[cfg(windows)]
-fn suggest_kill(pid: u32) -> String {
-    format!("taskkill /PID {pid} /F   -- or block just the remote IP: New-NetFirewallRule -DisplayName \"goofedup-block-pid{pid}\" -Direction Outbound -RemoteAddress <ip> -Action Block")
-}
-
-#[cfg(not(windows))]
-fn suggest_kill(pid: u32) -> String {
-    format!("kill -9 {pid}   -- or block just the remote IP with your platform's firewall (pfctl/iptables/nft)")
 }
 
 pub fn run_firewall_drift(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
@@ -144,33 +152,12 @@ pub fn run_firewall_drift(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc
                         "firewall-drift",
                         format!("firewall profile '{name}' went from enabled to disabled"),
                         "a common malware self-defense move -- this exact gap let the real incident's C2 traffic through unblocked".to_string(),
-                        Some(suggest_reenable(&name)),
                     );
                 }
             }
             last_state.insert(name, enabled);
         }
     }
-}
-
-#[cfg(windows)]
-fn suggest_reenable(name: &str) -> String {
-    format!("Set-NetFirewallProfile -Profile {name} -Enabled True")
-}
-
-#[cfg(target_os = "macos")]
-fn suggest_reenable(_name: &str) -> String {
-    "sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on".to_string()
-}
-
-#[cfg(target_os = "linux")]
-fn suggest_reenable(_name: &str) -> String {
-    "sudo ufw enable   (or re-check your iptables/nft ruleset if not using ufw)".to_string()
-}
-
-#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-fn suggest_reenable(_name: &str) -> String {
-    "re-enable your platform's firewall".to_string()
 }
 
 fn list_connections() -> Vec<Connection> {

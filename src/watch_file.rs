@@ -145,10 +145,6 @@ fn check_unusual_growth(
                             path.display()
                         ),
                         format!("baseline={baseline} bytes, current={current} bytes"),
-                        Some(format!(
-                            "diff against a known-clean copy before restoring; do not trust this file's current content: {}",
-                            path.display()
-                        )),
                     );
                 }
             }
@@ -184,10 +180,6 @@ pub fn check_bootstrap_size(cfg: &Config, alerts: &AlertSink, path: &std::path::
                     path.display()
                 ),
                 format!("size={} bytes, ceiling={} bytes", meta.len(), entry.max_bytes),
-                Some(format!(
-                    "diff against a known-clean copy before restoring; do not trust this file's current content: {}",
-                    path.display()
-                )),
             );
         }
     }
@@ -202,10 +194,6 @@ pub fn check_backup_sibling(_cfg: &Config, alerts: &AlertSink, path: &std::path:
             "backup-sibling",
             "a *.orig/*.bak/*.inz-style backup file appeared -- this is exactly the shape an infector leaves behind to preserve the original while it replaces the real file",
             path.display().to_string(),
-            Some(format!(
-                "compare the sibling (without the backup suffix) against this file before trusting either: {}",
-                path.display()
-            )),
         );
     }
 }

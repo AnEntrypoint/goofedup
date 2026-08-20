@@ -88,7 +88,6 @@ fn main() {
             "goofedup-gui",
             "tray icon render failed at startup -- running watchers with no tray shell",
             "icon::render returned None",
-            None,
         );
         run_watchers_headless(running);
         return;
@@ -106,7 +105,6 @@ fn main() {
                 "goofedup-gui",
                 "tray icon build failed at startup -- running watchers with no tray shell",
                 e.to_string(),
-                None,
             );
             run_watchers_headless(running);
             return;
@@ -163,7 +161,6 @@ fn main() {
                         "goofedup-gui",
                         "could not update Start with Windows -- registry write to HKCU Run failed",
                         format!("requested checked={}", autostart_item.is_checked()),
-                        Some("check whether another process holds the registry key open, or run once as the account that owns HKCU".to_string()),
                     );
                 }
             } else if event.id == quit_id {
@@ -239,7 +236,6 @@ fn open_alert_window(alerts: &AlertSink, title: &str, history: &History) {
             "goofedup-gui",
             "could not open the alert viewer",
             reason,
-            None,
         );
     }
 }
@@ -250,7 +246,6 @@ fn open_config_window(alerts: &AlertSink, title: &str, cfg: &Config) {
             "goofedup-gui",
             "could not open the config viewer",
             reason,
-            None,
         );
     }
 }
@@ -261,10 +256,11 @@ fn run_watchers_headless(running: Arc<AtomicBool>) {
     }
 }
 
-fn config_sections(cfg: &Config) -> Vec<(&'static str, Vec<(String, String)>)> {
+fn config_sections(cfg: &Config) -> Vec<(&'static str, &'static str, Vec<(String, String)>)> {
     vec![
         (
             "General",
+            "Basic runtime info: where logs are written and how often the background watchers poll.",
             vec![
                 ("Platform".to_string(), std::env::consts::OS.to_string()),
                 ("Log path".to_string(), cfg.log_path.display().to_string()),
@@ -273,6 +269,7 @@ fn config_sections(cfg: &Config) -> Vec<(&'static str, Vec<(String, String)>)> {
         ),
         (
             "Bootstrap Watch",
+            "Known-tiny entry-point files that must never grow past a sane size -- a real trusted app loader file suddenly ballooning is the tell-tale sign of it being overwritten with a payload.",
             cfg.bootstrap_watch
                 .iter()
                 .map(|e| {
@@ -285,6 +282,7 @@ fn config_sections(cfg: &Config) -> Vec<(&'static str, Vec<(String, String)>)> {
         ),
         (
             "Backup-Sibling Roots",
+            "Folders watched for a *.orig/*.bak-style backup file appearing next to a real one -- the copy an infector leaves behind to preserve the original while it replaces it.",
             cfg.backup_sibling_roots
                 .iter()
                 .enumerate()
@@ -293,6 +291,7 @@ fn config_sections(cfg: &Config) -> Vec<(&'static str, Vec<(String, String)>)> {
         ),
         (
             "Process Detection",
+            "Command lines are only inspected for these interpreters (avoids false-positiving on unrelated long command lines); paths containing these fragments are an instant flag for any process, regardless of name.",
             vec![
                 ("Watched interpreters".to_string(), cfg.watched_interpreters.join(", ")),
                 ("Denied exec path fragments".to_string(), cfg.deny_exec_path_fragments.join(", ")),
@@ -300,6 +299,7 @@ fn config_sections(cfg: &Config) -> Vec<(&'static str, Vec<(String, String)>)> {
         ),
         (
             "Allowed Exec Roots",
+            "Processes launching from one of these locations are treated as trusted and do not trigger the unusual-path warning -- launching from anywhere else still gets flagged for review, even a normally-legitimate install location, since a trusted location can still be compromised.",
             cfg.allowed_exec_roots
                 .iter()
                 .enumerate()
@@ -308,13 +308,37 @@ fn config_sections(cfg: &Config) -> Vec<(&'static str, Vec<(String, String)>)> {
         ),
         (
             "Network Scan Thresholds",
+            "A process opening connections to this many distinct destination ports or hosts within the window below is flagged as scanning behavior.",
             vec![
                 ("Distinct ports".to_string(), format!("{}+", cfg.scan_distinct_ports_threshold)),
                 ("Distinct hosts".to_string(), format!("{}+", cfg.scan_distinct_hosts_threshold)),
                 ("Window".to_string(), format!("{}s", cfg.scan_window_secs)),
             ],
         ),
+        (
+            "File-Read-Burst Thresholds",
+            "Watches every running process for an unusual amount of file reading in one interval -- either an absolute amount, or a large multiple of that process's own recent average -- the tell-tale shape of drive scanning or harvesting.",
+            vec![
+                ("Absolute burst".to_string(), format_bytes_for_config(cfg.file_read_burst_absolute_bytes_per_poll)),
+                ("Relative spike multiplier".to_string(), format!("{}x", cfg.file_read_burst_relative_multiplier)),
+            ],
+        ),
     ]
+}
+
+fn format_bytes_for_config(b: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if b >= GB {
+        format!("{:.1}GB", b as f64 / GB as f64)
+    } else if b >= MB {
+        format!("{:.1}MB", b as f64 / MB as f64)
+    } else if b >= KB {
+        format!("{:.1}KB", b as f64 / KB as f64)
+    } else {
+        format!("{b}B")
+    }
 }
 
 fn spawn_watchers(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {

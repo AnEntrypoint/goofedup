@@ -10,7 +10,7 @@ Nobody signed anything. No antivirus signature file had ever heard of this exact
 
 ## What it watches
 
-All watchers run concurrently, are **alert-only** (nothing is ever killed, deleted, or blocked automatically — every actionable alert prints the exact command to run yourself), and work identically on Windows, macOS, and Linux:
+All watchers run concurrently, are **alert-only** (nothing is ever killed, deleted, or blocked automatically, and no remedy is prescribed — every alert is a report so you can judge for yourself whether it's suspicious), and work identically on Windows, macOS, and Linux:
 
 - **Bootstrap tampering** — a known-tiny entry-point file suddenly huge, plus a fully generic detector (no app name required) for *any* small script file that balloons 10x+ past its own baseline size.
 - **Backup-sibling files** — a `.orig`/`.bak`/`.inz`/`.old` file appearing next to a real one, the tell an infector leaves behind to preserve the original.
@@ -68,10 +68,11 @@ console window and a system-tray icon instead:
 - **Right-click menu:**
   - *Open Recent Alerts* — opens a native alert history window (a list with
     severity-colored rows — red for Critical, amber for Warn — plus a details
-    pane showing evidence/suggested action for the selected entry) and clears
-    the red-icon flag.
+    pane showing the evidence for the selected entry) and clears the
+    red-icon flag.
   - *Show Config* — opens the resolved watch list/thresholds as a sectioned
-    list with bold group headers, grouped by category.
+    list with bold group headers and a plain-language description of what
+    each section means, grouped by category.
   - *Pause Alerts* — a checkable item that silences new alerts on demand
     (the tray icon goes gray, the tooltip says PAUSED) without killing the
     app or its watcher threads, for known maintenance windows.
