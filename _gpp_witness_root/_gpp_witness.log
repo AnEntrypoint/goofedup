@@ -1,8 +1,0 @@
-[2026-08-20 22:06:30] [INFO] [process] watching new processes (poll every 1s) for: obfuscated inline payloads, unusual/denied exec paths, masquerading names
-[2026-08-20 22:06:30] [INFO] [file-read-burst] watching ALL running processes for mass file-read bursts: 50.0MB+ bytes/poll absolute, or 8x+ a process's own recent average
-[2026-08-20 22:06:33] [WARN] [process-path] 'witness_a.exe' (PID 4356) is running from a path outside the known-good allowlist
-    evidence: exe=C:\dev\goofedup\_gpp_witness_root\pathA\witness_a.exe
-[2026-08-20 22:06:44] [WARN] [process-path] 'witness_b.exe' (PID 39748) is running from a path outside the known-good allowlist
-    evidence: exe=C:\dev\goofedup\_gpp_witness_root\pathB\witness_b.exe
-[2026-08-20 22:06:47] [WARN] [process-path] 'litebox_runner_linux_on_windows_userland.exe' (PID 30248) is running from a path outside the known-good allowlist
-    evidence: exe=C:\dev\litebox-main\target\debug\litebox_runner_linux_on_windows_userland.exe
