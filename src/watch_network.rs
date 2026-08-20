@@ -214,7 +214,15 @@ fn firewall_profile_state() -> Vec<(String, bool)> {
 #[cfg(windows)]
 mod windows_impl {
     use super::Connection;
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+
+    // Windows allocates a fresh visible console window for any
+    // console-subsystem child process spawned by a process that has none of
+    // its own (goofedup-gui.exe is windows_subsystem=windows) unless this
+    // flag is passed to CreateProcess -- every Command::new in this module
+    // needs it or the tray GUI flashes a console on each poll.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     pub fn list_connections() -> Vec<Connection> {
         // netstat -ano is the pragmatic cross-version-Windows choice here
@@ -222,7 +230,7 @@ mod windows_impl {
         // and this runs on a multi-second poll interval so process-spawn
         // overhead is a non-issue.
         let mut out = Vec::new();
-        let Ok(o) = Command::new("netstat").args(["-ano", "-p", "TCP"]).output() else {
+        let Ok(o) = Command::new("netstat").args(["-ano", "-p", "TCP"]).creation_flags(CREATE_NO_WINDOW).output() else {
             return out;
         };
         let Ok(text) = String::from_utf8(o.stdout) else {
@@ -260,22 +268,15 @@ mod windows_impl {
     }
 
     fn pid_name_map() -> std::collections::HashMap<u32, String> {
-        let mut map = std::collections::HashMap::new();
-        let Ok(o) = Command::new("tasklist").args(["/FO", "CSV", "/NH"]).output() else {
-            return map;
-        };
-        let Ok(text) = String::from_utf8(o.stdout) else {
-            return map;
-        };
-        for line in text.lines() {
-            let fields: Vec<&str> = line.split(',').map(|f| f.trim_matches('"')).collect();
-            if fields.len() >= 2 {
-                if let Ok(pid) = fields[1].parse::<u32>() {
-                    map.insert(pid, fields[0].to_string());
-                }
-            }
-        }
-        map
+        // sysinfo::System is already a dependency (see watch_process.rs) and
+        // gives pid->name natively, eliminating the tasklist.exe shell-out
+        // and its console-flash risk entirely rather than just suppressing
+        // the window.
+        let sys = sysinfo::System::new_all();
+        sys.processes()
+            .iter()
+            .map(|(pid, proc)| (pid.as_u32(), proc.name().to_string_lossy().to_string()))
+            .collect()
     }
 
     fn split_host_port(s: &str) -> Option<(String, u16)> {
@@ -297,6 +298,7 @@ mod windows_impl {
                 "-Command",
                 "Get-NetFirewallProfile | Select-Object Name,Enabled | ConvertTo-Json -Compress",
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .output()
         else {
             return out;

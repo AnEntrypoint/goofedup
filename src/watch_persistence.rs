@@ -138,7 +138,19 @@ fn enumerate() -> Vec<PersistenceEntry> {
 #[cfg(windows)]
 mod windows_impl {
     use super::PersistenceEntry;
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegEnumValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, REG_SZ,
+    };
+
+    // Windows allocates a fresh visible console window for any
+    // console-subsystem child process spawned by a process that has none of
+    // its own (goofedup-gui.exe is windows_subsystem=windows) unless this
+    // flag is passed to CreateProcess -- every remaining Command::new in
+    // this module needs it or the tray GUI flashes a console on each audit.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     pub fn enumerate() -> Vec<PersistenceEntry> {
         let mut out = Vec::new();
@@ -159,6 +171,7 @@ mod windows_impl {
                 "-Command",
                 "Get-CimInstance Win32_Service | Select-Object -Property Name,PathName | ConvertTo-Json -Compress",
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .output();
         parse_ps_json_list(out, "service", "Name", "PathName")
     }
@@ -170,39 +183,70 @@ mod windows_impl {
                 "-Command",
                 "Get-ScheduledTask | ForEach-Object { $a = ($_.Actions | Select-Object -First 1); [PSCustomObject]@{ Name = $_.TaskName; PathName = \"$($a.Execute) $($a.Arguments)\" } } | ConvertTo-Json -Compress",
             ])
+            .creation_flags(CREATE_NO_WINDOW)
             .output();
         parse_ps_json_list(out, "scheduled-task", "Name", "PathName")
     }
 
     fn run_keys() -> Vec<PersistenceEntry> {
+        // Native RegEnumValueW replaces the prior Get-ItemProperty
+        // powershell shell-out entirely -- same registry data, zero
+        // process spawn, zero console-flash risk. Pattern mirrors
+        // src/gui/autostart.rs's existing RegOpenKeyExW usage.
         let mut out = Vec::new();
-        for hive_path in [
-            "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-            "HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        ] {
-            let cmd = format!(
-                "Get-ItemProperty '{hive_path}' -ErrorAction SilentlyContinue | Select-Object * -ExcludeProperty PS* | ConvertTo-Json -Compress"
-            );
-            let res = Command::new("powershell")
-                .args(["-NoProfile", "-Command", &cmd])
-                .output();
-            if let Ok(o) = res {
-                if let Ok(text) = String::from_utf8(o.stdout) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let serde_json::Value::Object(map) = val {
-                            for (k, v) in map {
-                                if let Some(cmd_str) = v.as_str() {
-                                    out.push(PersistenceEntry {
-                                        kind: "login-item",
-                                        name: k,
-                                        command: cmd_str.to_string(),
-                                    });
-                                }
-                            }
-                        }
+        for (hive, hive_name) in [(HKEY_CURRENT_USER, "HKCU"), (HKEY_LOCAL_MACHINE, "HKLM")] {
+            out.extend(enum_run_key_values(hive, hive_name));
+        }
+        out
+    }
+
+    fn enum_run_key_values(hive: HKEY, hive_name: &str) -> Vec<PersistenceEntry> {
+        const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+        let mut out = Vec::new();
+        unsafe {
+            let mut hkey = HKEY::default();
+            if RegOpenKeyExW(hive, &HSTRING::from(RUN_KEY), 0, KEY_QUERY_VALUE, &mut hkey).is_err() {
+                return out;
+            }
+            let mut index = 0u32;
+            loop {
+                let mut name_buf = [0u16; 256];
+                let mut name_len = name_buf.len() as u32;
+                let mut value_type = REG_SZ.0;
+                let mut data_buf = [0u8; 2048];
+                let mut data_len = data_buf.len() as u32;
+                let result = RegEnumValueW(
+                    hkey,
+                    index,
+                    windows::core::PWSTR(name_buf.as_mut_ptr()),
+                    &mut name_len,
+                    None,
+                    Some(&mut value_type),
+                    Some(data_buf.as_mut_ptr()),
+                    Some(&mut data_len),
+                );
+                if result.is_err() {
+                    break;
+                }
+                if value_type == REG_SZ.0 {
+                    let name = String::from_utf16_lossy(&name_buf[..name_len as usize]);
+                    let data_u16: Vec<u16> = data_buf[..data_len as usize]
+                        .chunks_exact(2)
+                        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                        .take_while(|&c| c != 0)
+                        .collect();
+                    let value = String::from_utf16_lossy(&data_u16);
+                    if !name.is_empty() {
+                        out.push(PersistenceEntry {
+                            kind: "login-item",
+                            name: format!("{hive_name}\\{name}"),
+                            command: value,
+                        });
                     }
                 }
+                index += 1;
             }
+            let _ = RegCloseKey(hkey);
         }
         out
     }

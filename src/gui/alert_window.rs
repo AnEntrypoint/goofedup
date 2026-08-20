@@ -2,6 +2,16 @@
 // custom-drawn window -- a bounded win32 rich-text renderer is a lot of
 // surface for what is fundamentally a scrollable text view, and Notepad
 // already gives search/copy/select for free.
+//
+// Kept as an external-tool dependency deliberately: unlike the powershell/
+// netstat/tasklist calls eliminated elsewhere in this codebase, notepad.exe
+// is a GUI-subsystem process, so ShellExecuteW launching it never flashes a
+// console window -- it carries none of the terminal-flash bug this pass
+// fixes. It already degrades gracefully (Result<(), String> surfaced to the
+// user via the toast pipeline on failure), and it is a standard, always-
+// present OS utility rather than a scripting shell. A native replacement
+// window is disproportionate effort for this pass; revisit only if Notepad
+// itself becomes unavailable/sandboxed in a target environment.
 
 use std::io::Write;
 use windows::core::HSTRING;
