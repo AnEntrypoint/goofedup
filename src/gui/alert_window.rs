@@ -4,29 +4,33 @@ use std::sync::Once;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, FillRect, GetDC,
-    GetDeviceCaps, ReleaseDC, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
-    DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD,
-    FW_NORMAL, LOGPIXELSY, OUT_DEFAULT_PRECIS, TRANSPARENT, CLIP_DEFAULT_PRECIS,
+    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse,
+    EndPaint, FillRect, GetDC, GetDeviceCaps, InvalidateRect, PAINTSTRUCT, ReleaseDC, RoundRect,
+    SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DT_CALCRECT, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, FF_DONTCARE,
+    FW_BOLD, FW_NORMAL, LOGPIXELSY, OUT_DEFAULT_PRECIS, PS_SOLID, TRANSPARENT, CLIP_DEFAULT_PRECIS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     ImageList_Create, InitCommonControlsEx, DRAWITEMSTRUCT, ICC_LISTVIEW_CLASSES, ILC_COLOR32,
     INITCOMMONCONTROLSEX, LVCFMT_LEFT, LVCOLUMNW, LVITEMW, LVCF_FMT, LVCF_SUBITEM, LVCF_TEXT,
     LVCF_WIDTH, LVIF_TEXT, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETIMAGELIST, LVM_SETITEMW,
-    LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES, LVS_OWNERDRAWFIXED, LVS_REPORT, LVS_SINGLESEL,
-    LVSIL_SMALL, NMHDR, NMLISTVIEW, ODT_LISTVIEW, WC_LISTVIEWW, WC_STATICW, LVN_ITEMCHANGED,
+    LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES, LVS_OWNERDRAWFIXED, LVS_REPORT,
+    LVSIL_SMALL, ODT_LISTVIEW, WC_LISTVIEWW, WC_STATICW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetClientRect,
     GetMessageW, GetWindowLongPtrW, HICON, LoadCursorW, PostQuitMessage, RegisterClassW,
     SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
-    CW_USEDEFAULT, GWLP_USERDATA, HMENU, ICON_BIG, ICON_SMALL, MSG, SW_SHOW, SWP_NOZORDER,
-    WINDOW_STYLE, WM_CLOSE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_GETMINMAXINFO,
-    WM_KEYDOWN, WM_NOTIFY, WM_SETFONT, WM_SETICON, WM_SIZE, WNDCLASSW, WS_BORDER, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
+    CW_USEDEFAULT, GWLP_USERDATA, HMENU, ICON_BIG, ICON_SMALL, MSG, SB_BOTTOM, SB_VERT,
+    SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP,
+    SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE, SW_SHOW, SWP_NOZORDER, WINDOW_STYLE, WM_CLOSE,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DRAWITEM, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_MOUSEWHEEL, WM_PAINT, WM_SETFONT, WM_SETICON, WM_SIZE, WM_VSCROLL, WNDCLASSW,
+    WS_BORDER, WS_CHILD, WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
+use windows::Win32::UI::Controls::SetScrollInfo;
 
 const SS_CENTER: WINDOW_STYLE = WINDOW_STYLE(1);
 const SS_CENTERIMAGE: WINDOW_STYLE = WINDOW_STYLE(512);
@@ -39,24 +43,30 @@ const MIN_WINDOW_HEIGHT: i32 = 360;
 const BASE_FONT_POINT_SIZE: i32 = 11;
 
 const LIST_ID: i32 = 1001;
-const DETAILS_ID: i32 = 1002;
 const EMPTY_LABEL_ID: i32 = 1003;
+const FEED_ID: i32 = 1004;
 
-const CRITICAL_BG: (u8, u8, u8) = (254, 226, 226);
+const FEED_CLASS_NAME: PCWSTR = w!("GoofedupAlertFeed");
+const CARD_MARGIN_X: i32 = 12;
+const CARD_MARGIN_TOP: i32 = 10;
+const CARD_GAP: i32 = 8;
+const CARD_PADDING: i32 = 12;
+const CARD_BADGE_DIAMETER: i32 = 12;
+const CARD_BORDER: (u8, u8, u8) = (226, 232, 240);
+const CARD_BG: (u8, u8, u8) = (255, 255, 255);
+const CARD_HOVER_HINT_FG: (u8, u8, u8) = (148, 163, 184);
+
 const CRITICAL_FG: (u8, u8, u8) = (153, 27, 27);
-const WARN_BG: (u8, u8, u8) = (255, 251, 235);
 const WARN_FG: (u8, u8, u8) = (146, 64, 14);
 const HEADER_BG: (u8, u8, u8) = (238, 242, 247);
 const HEADER_FG: (u8, u8, u8) = (30, 41, 59);
 const DESCRIPTION_FG: (u8, u8, u8) = (100, 116, 139);
 
-// Solid (non-pastel) fill for the severity badge dot -- distinct from the
-// pastel CRITICAL_BG/WARN_BG row tint so the badge reads as a deliberate
-// indicator against the row, not just more of the same wash of color.
+// Solid badge dot fill -- used both for a card's severity indicator and
+// its accent subline text color.
 const CRITICAL_BADGE: (u8, u8, u8) = (220, 38, 38);
 const WARN_BADGE: (u8, u8, u8) = (217, 119, 6);
 const INFO_BADGE: (u8, u8, u8) = (100, 116, 139);
-const BADGE_DIAMETER: i32 = 10;
 const CELL_LEFT_PADDING: i32 = 10;
 const CELL_RIGHT_PADDING: i32 = 10;
 const ROW_HEIGHT_PX: i32 = 26;
@@ -65,7 +75,6 @@ static REGISTER_CLASS: Once = Once::new();
 
 #[derive(Clone, Copy)]
 enum RowKind {
-    Alert(crate::alert::Level),
     SectionHeader,
     Description,
     Plain,
@@ -73,11 +82,80 @@ enum RowKind {
 
 struct WindowState {
     row_kinds: Vec<RowKind>,
-    details: Vec<String>,
     base_font: windows::Win32::Graphics::Gdi::HFONT,
     bold_font: windows::Win32::Graphics::Gdi::HFONT,
     owner_draw_column_widths: Vec<i32>,
     caller_owned_destroy_icon: HICON,
+}
+
+/// Card-feed state for the alert history view: one card per entry, each
+/// independently expandable. Layout (each card's y-position and height) is
+/// ALWAYS recomputed fresh from `entries`/`expanded`/`viewport_width` --
+/// never cached across a toggle -- so a click on any card after another
+/// card's expand/collapse always hit-tests against the current, correct
+/// post-reflow position (mut-card-hit-test-post-reflow).
+struct CardFeedState {
+    entries: Vec<EntrySnapshot>,
+    expanded: Vec<bool>,
+    scroll_offset_y: i32,
+    base_font: windows::Win32::Graphics::Gdi::HFONT,
+    bold_font: windows::Win32::Graphics::Gdi::HFONT,
+}
+
+struct CardLayout {
+    /// Top y-coordinate of each card in unscrolled content space (i.e. as if
+    /// scroll_offset_y were 0) -- subtract scroll_offset_y to get the actual
+    /// on-screen position for painting/hit-testing.
+    card_top: Vec<i32>,
+    card_height: Vec<i32>,
+    total_height: i32,
+}
+
+fn measure_wrapped_text_height(hdc: windows::Win32::Graphics::Gdi::HDC, text: &str, width: i32) -> i32 {
+    if text.is_empty() || width <= 0 {
+        return 0;
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = RECT { left: 0, top: 0, right: width, bottom: 0 };
+    unsafe {
+        DrawTextW(hdc, &mut wide, &mut rect, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+    }
+    (rect.bottom - rect.top).max(0)
+}
+
+/// Recomputes every card's position/height from scratch against the given
+/// device context (needed for accurate DT_CALCRECT text measurement) and
+/// viewport width. Deliberately stateless/idempotent -- called on every
+/// paint and every hit-test, never memoized, so it can never go stale
+/// relative to `expanded` (mut-card-hit-test-post-reflow).
+fn compute_card_layout(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    feed: &CardFeedState,
+    viewport_width: i32,
+) -> CardLayout {
+    let mut card_top = Vec::with_capacity(feed.entries.len());
+    let mut card_height = Vec::with_capacity(feed.entries.len());
+    let mut y = CARD_MARGIN_TOP;
+    let text_width = (viewport_width - CARD_MARGIN_X * 2 - CARD_PADDING * 2).max(40);
+
+    for (i, e) in feed.entries.iter().enumerate() {
+        card_top.push(y);
+        // Headline (bold, single line, may itself wrap on a narrow window)
+        // + timestamp/category subline (single line) + optional expanded
+        // evidence block (wrapped multi-line).
+        let headline_h = measure_wrapped_text_height(hdc, &e.message, text_width).max(18);
+        let subline_h = 18;
+        let mut h = CARD_PADDING * 2 + headline_h + 4 + subline_h;
+        if feed.expanded.get(i).copied().unwrap_or(false) {
+            let detail_text = e.evidence.as_deref().unwrap_or("No further evidence recorded.");
+            let detail_h = measure_wrapped_text_height(hdc, detail_text, text_width).max(18);
+            h += 8 + detail_h;
+        }
+        card_height.push(h);
+        y += h + CARD_GAP;
+    }
+    let total_height = if feed.entries.is_empty() { 0 } else { (y - CARD_GAP + CARD_MARGIN_TOP).max(0) };
+    CardLayout { card_top, card_height, total_height }
 }
 
 fn rgb(c: (u8, u8, u8)) -> COLORREF {
@@ -100,34 +178,22 @@ fn resize_children_to_client_area(hwnd: HWND) {
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
 
+        // The config window's ListView (LIST_ID) is the only remaining
+        // consumer of this branch -- the alert history no longer creates a
+        // ListView or a details pane, it uses FEED_ID below.
         if let Ok(list_hwnd) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, LIST_ID) {
             if !list_hwnd.is_invalid() {
-                let details_exists =
-                    !windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, DETAILS_ID)
-                        .map(|h| h.is_invalid())
-                        .unwrap_or(true);
-                let list_height = if details_exists { (height * 2) / 3 } else { height };
-                let _ = SetWindowPos(list_hwnd, None, 0, 0, width, list_height, SWP_NOZORDER);
-                if details_exists {
-                    if let Ok(details_hwnd) =
-                        windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, DETAILS_ID)
-                    {
-                        let _ = SetWindowPos(
-                            details_hwnd,
-                            None,
-                            0,
-                            list_height,
-                            width,
-                            height - list_height,
-                            SWP_NOZORDER,
-                        );
-                    }
-                }
+                let _ = SetWindowPos(list_hwnd, None, 0, 0, width, height, SWP_NOZORDER);
             }
         }
         if let Ok(empty_hwnd) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, EMPTY_LABEL_ID) {
             if !empty_hwnd.is_invalid() {
                 let _ = SetWindowPos(empty_hwnd, None, 0, 0, width, height, SWP_NOZORDER);
+            }
+        }
+        if let Ok(feed_hwnd) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, FEED_ID) {
+            if !feed_hwnd.is_invalid() {
+                let _ = SetWindowPos(feed_hwnd, None, 0, 0, width, height, SWP_NOZORDER);
             }
         }
     }
@@ -162,9 +228,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let idx = (*dis).itemID as usize;
                 let kind = state.row_kinds.get(idx).copied().unwrap_or(RowKind::Plain);
                 let (bg, fg) = match kind {
-                    RowKind::Alert(crate::alert::Level::Critical) => (CRITICAL_BG, CRITICAL_FG),
-                    RowKind::Alert(crate::alert::Level::Warn) => (WARN_BG, WARN_FG),
-                    RowKind::Alert(_) => ((255, 255, 255), (0, 0, 0)),
                     RowKind::SectionHeader => (HEADER_BG, HEADER_FG),
                     RowKind::Description => ((255, 255, 255), DESCRIPTION_FG),
                     RowKind::Plain => ((255, 255, 255), (0, 0, 0)),
@@ -184,8 +247,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let list_hwnd = (*dis).hwndItem;
                 let column_count = state.owner_draw_column_widths.len();
                 let mut col_x = (*dis).rcItem.left + CELL_LEFT_PADDING;
-                let is_severity_column_badge_eligible =
-                    matches!(kind, RowKind::Alert(_)) && column_count > 0;
                 for col in 0..column_count {
                     let mut buf = [0u16; 512];
                     let mut item = LVITEMW {
@@ -212,41 +273,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                         state.owner_draw_column_widths[col]
                     };
 
-                    // Severity badge: a small solid-color dot drawn before the
-                    // text in column 0, so severity reads as a shape/color at
-                    // a glance instead of requiring the eye to parse the word
-                    // CRITICAL/WARN/INFO. Row background tint alone (the prior
-                    // behavior) is far more subtle than a dedicated indicator.
-                    let mut text_left = col_x;
-                    if col == 0 && is_severity_column_badge_eligible {
-                        if let RowKind::Alert(level) = kind {
-                            let badge_color = match level {
-                                crate::alert::Level::Critical => CRITICAL_BADGE,
-                                crate::alert::Level::Warn => WARN_BADGE,
-                                crate::alert::Level::Info => INFO_BADGE,
-                            };
-                            let cy = ((*dis).rcItem.top + (*dis).rcItem.bottom) / 2;
-                            let badge_rect = RECT {
-                                left: col_x,
-                                top: cy - BADGE_DIAMETER / 2,
-                                right: col_x + BADGE_DIAMETER,
-                                bottom: cy + BADGE_DIAMETER / 2,
-                            };
-                            let badge_brush = CreateSolidBrush(rgb(badge_color));
-                            let old_brush = SelectObject((*dis).hDC, badge_brush);
-                            let _ = Ellipse(
-                                (*dis).hDC,
-                                badge_rect.left,
-                                badge_rect.top,
-                                badge_rect.right,
-                                badge_rect.bottom,
-                            );
-                            SelectObject((*dis).hDC, old_brush);
-                            let _ = DeleteObject(badge_brush);
-                            text_left = col_x + BADGE_DIAMETER + 6;
-                        }
-                    }
-
+                    let text_left = col_x;
                     let would_crash_drawtextw_with_zero_length_buffer = text.is_empty();
                     if !would_crash_drawtextw_with_zero_length_buffer {
                         let mut cell_rect = RECT {
@@ -268,26 +295,6 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 windows::Win32::Graphics::Gdi::SelectObject((*dis).hDC, old_font);
             }
             LRESULT(1)
-        }
-        WM_NOTIFY => {
-            let nmhdr = lparam.0 as *const NMHDR;
-            if !nmhdr.is_null() && (*nmhdr).code == LVN_ITEMCHANGED {
-                let nmlv = lparam.0 as *const NMLISTVIEW;
-                if !nmlv.is_null() && (*nmlv).iItem >= 0 {
-                    if let Some(state) = window_state(hwnd) {
-                        if let Ok(details_hwnd) =
-                            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, DETAILS_ID)
-                        {
-                            if !details_hwnd.is_invalid() {
-                                let idx = (*nmlv).iItem as usize;
-                                let text = state.details.get(idx).cloned().unwrap_or_default();
-                                let _ = SetWindowTextW(details_hwnd, &HSTRING::from(text.as_str()));
-                            }
-                        }
-                    }
-                }
-            }
-            LRESULT(0)
         }
         WM_CLOSE => {
             let _ = DestroyWindow(hwnd);
@@ -316,6 +323,275 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+unsafe fn feed_state(hwnd: HWND) -> Option<&'static mut CardFeedState> {
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut CardFeedState;
+    if ptr.is_null() {
+        None
+    } else {
+        Some(&mut *ptr)
+    }
+}
+
+/// Clamps scroll_offset_y to [0, max(0, total_height - viewport_height)] --
+/// the sole place this clamp is applied, called after every event that can
+/// change either operand (mut-card-scroll-bounds).
+fn clamp_scroll_offset(offset: i32, total_height: i32, viewport_height: i32) -> i32 {
+    let max_offset = (total_height - viewport_height).max(0);
+    offset.clamp(0, max_offset)
+}
+
+fn feed_update_scrollbar(hwnd: HWND, total_height: i32, viewport_height: i32, offset: i32) {
+    unsafe {
+        let mut si = SCROLLINFO {
+            cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+            nMin: 0,
+            nMax: total_height.max(0),
+            nPage: viewport_height.max(0) as u32,
+            nPos: offset,
+            nTrackPos: 0,
+        };
+        SetScrollInfo(hwnd, SB_VERT, &mut si, true);
+    }
+}
+
+unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            let mut ps = PAINTSTRUCT::default();
+            let hdc = BeginPaint(hwnd, &mut ps);
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let width = client.right - client.left;
+            let height = client.bottom - client.top;
+
+            if let Some(state) = feed_state(hwnd) {
+                let layout = compute_card_layout(hdc, state, width);
+                state.scroll_offset_y = clamp_scroll_offset(state.scroll_offset_y, layout.total_height, height);
+                let offset = state.scroll_offset_y;
+
+                let bg_brush = CreateSolidBrush(rgb((248, 250, 252)));
+                let _ = FillRect(hdc, &client, bg_brush);
+                let _ = DeleteObject(bg_brush);
+
+                for (i, e) in state.entries.iter().enumerate() {
+                    let top = layout.card_top[i] - offset;
+                    let h = layout.card_height[i];
+                    let bottom = top + h;
+                    // mut-card-paint-viewport-clip: skip any card whose rect
+                    // does not intersect the visible client area at all.
+                    if bottom < 0 || top > height {
+                        continue;
+                    }
+
+                    let card_rect = RECT {
+                        left: CARD_MARGIN_X,
+                        top,
+                        right: width - CARD_MARGIN_X,
+                        bottom,
+                    };
+
+                    let (badge_color, accent_fg) = match e.level {
+                        crate::alert::Level::Critical => (CRITICAL_BADGE, CRITICAL_FG),
+                        crate::alert::Level::Warn => (WARN_BADGE, WARN_FG),
+                        crate::alert::Level::Info => (INFO_BADGE, DESCRIPTION_FG),
+                    };
+
+                    let card_brush = CreateSolidBrush(rgb(CARD_BG));
+                    let border_pen = CreatePen(PS_SOLID, 1, rgb(CARD_BORDER));
+                    let old_brush = SelectObject(hdc, card_brush);
+                    let old_pen = SelectObject(hdc, border_pen);
+                    let _ = RoundRect(hdc, card_rect.left, card_rect.top, card_rect.right, card_rect.bottom, 8, 8);
+                    SelectObject(hdc, old_brush);
+                    SelectObject(hdc, old_pen);
+                    let _ = DeleteObject(card_brush);
+                    let _ = DeleteObject(border_pen);
+
+                    let badge_cy = card_rect.top + CARD_PADDING + 8;
+                    let badge_brush = CreateSolidBrush(rgb(badge_color));
+                    let old_brush2 = SelectObject(hdc, badge_brush);
+                    let _ = Ellipse(
+                        hdc,
+                        card_rect.left + CARD_PADDING,
+                        badge_cy - CARD_BADGE_DIAMETER / 2,
+                        card_rect.left + CARD_PADDING + CARD_BADGE_DIAMETER,
+                        badge_cy + CARD_BADGE_DIAMETER / 2,
+                    );
+                    SelectObject(hdc, old_brush2);
+                    let _ = DeleteObject(badge_brush);
+
+                    let text_left = card_rect.left + CARD_PADDING + CARD_BADGE_DIAMETER + 8;
+                    let text_right = card_rect.right - CARD_PADDING;
+
+                    let old_font = SelectObject(hdc, state.bold_font);
+                    SetTextColor(hdc, rgb((15, 23, 42)));
+                    let _ = SetBkMode(hdc, TRANSPARENT);
+                    let text_width = (text_right - text_left).max(10);
+                    let headline_h = measure_wrapped_text_height(hdc, &e.message, text_width).max(18);
+                    let mut headline_rect = RECT {
+                        left: text_left,
+                        top: card_rect.top + CARD_PADDING,
+                        right: text_right,
+                        bottom: card_rect.top + CARD_PADDING + headline_h,
+                    };
+                    let mut headline_wide: Vec<u16> = e.message.encode_utf16().collect();
+                    DrawTextW(hdc, &mut headline_wide, &mut headline_rect, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+
+                    SelectObject(hdc, state.base_font);
+                    SetTextColor(hdc, rgb(accent_fg));
+                    let subline = format!("{}   \u{2022}   {}", e.ts, e.category);
+                    let mut subline_rect = RECT {
+                        left: text_left,
+                        top: headline_rect.bottom + 4,
+                        right: text_right,
+                        bottom: headline_rect.bottom + 4 + 18,
+                    };
+                    let mut subline_wide: Vec<u16> = subline.encode_utf16().collect();
+                    DrawTextW(hdc, &mut subline_wide, &mut subline_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+
+                    let is_expanded = state.expanded.get(i).copied().unwrap_or(false);
+                    if is_expanded {
+                        let detail_text = e.evidence.as_deref().unwrap_or("No further evidence recorded.");
+                        SetTextColor(hdc, rgb((51, 65, 85)));
+                        let detail_h = measure_wrapped_text_height(hdc, detail_text, text_width).max(18);
+                        let mut detail_rect = RECT {
+                            left: text_left,
+                            top: subline_rect.bottom + 8,
+                            right: text_right,
+                            bottom: subline_rect.bottom + 8 + detail_h,
+                        };
+                        let mut detail_wide: Vec<u16> = detail_text.encode_utf16().collect();
+                        DrawTextW(hdc, &mut detail_wide, &mut detail_rect, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+                    } else {
+                        SetTextColor(hdc, rgb(CARD_HOVER_HINT_FG));
+                        let hint = "click to expand";
+                        let mut hint_rect = RECT {
+                            left: text_right - 110,
+                            top: subline_rect.top,
+                            right: text_right,
+                            bottom: subline_rect.bottom,
+                        };
+                        let mut hint_wide: Vec<u16> = hint.encode_utf16().collect();
+                        DrawTextW(hdc, &mut hint_wide, &mut hint_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                    }
+
+                    SelectObject(hdc, old_font);
+                }
+
+                feed_update_scrollbar(hwnd, layout.total_height, height, offset);
+            }
+
+            let _ = EndPaint(hwnd, &ps);
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            let x = (lparam.0 & 0xFFFF) as i16 as i32;
+            let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let width = client.right - client.left;
+
+            if let Some(state) = feed_state(hwnd) {
+                let hdc = GetDC(hwnd);
+                let layout = compute_card_layout(hdc, state, width);
+                ReleaseDC(hwnd, hdc);
+                let offset = state.scroll_offset_y;
+                for i in 0..state.entries.len() {
+                    let top = layout.card_top[i] - offset;
+                    let bottom = top + layout.card_height[i];
+                    if y >= top && y < bottom && x >= 0 && x < width {
+                        // mut-card-hit-test-post-reflow: toggling recomputes
+                        // layout fresh on the NEXT paint/hit-test, never
+                        // reuses this call's `layout` for anything after
+                        // the toggle.
+                        if let Some(v) = state.expanded.get_mut(i) {
+                            *v = !*v;
+                        }
+                        let _ = InvalidateRect(hwnd, None, true);
+                        break;
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam.0 >> 16) & 0xFFFF) as i16 as i32;
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let height = client.bottom - client.top;
+            let width = client.right - client.left;
+            if let Some(state) = feed_state(hwnd) {
+                let hdc = GetDC(hwnd);
+                let layout = compute_card_layout(hdc, state, width);
+                ReleaseDC(hwnd, hdc);
+                let step = (delta / 120) * 48;
+                let new_offset = state.scroll_offset_y - step;
+                state.scroll_offset_y = clamp_scroll_offset(new_offset, layout.total_height, height);
+                let _ = InvalidateRect(hwnd, None, true);
+            }
+            LRESULT(0)
+        }
+        WM_VSCROLL => {
+            let code = (wparam.0 & 0xFFFF) as i32;
+            let mut client = RECT::default();
+            let _ = GetClientRect(hwnd, &mut client);
+            let height = client.bottom - client.top;
+            let width = client.right - client.left;
+            if let Some(state) = feed_state(hwnd) {
+                let hdc = GetDC(hwnd);
+                let layout = compute_card_layout(hdc, state, width);
+                ReleaseDC(hwnd, hdc);
+                let page = height.max(1);
+                let new_offset = match code {
+                    c if c == SB_LINEUP.0 => state.scroll_offset_y - 24,
+                    c if c == SB_LINEDOWN.0 => state.scroll_offset_y + 24,
+                    c if c == SB_PAGEUP.0 => state.scroll_offset_y - page,
+                    c if c == SB_PAGEDOWN.0 => state.scroll_offset_y + page,
+                    c if c == SB_TOP.0 => 0,
+                    c if c == SB_BOTTOM.0 => layout.total_height,
+                    c if c == SB_THUMBTRACK.0 || c == SB_THUMBPOSITION.0 => {
+                        ((wparam.0 >> 16) & 0xFFFF) as i32
+                    }
+                    _ => state.scroll_offset_y,
+                };
+                state.scroll_offset_y = clamp_scroll_offset(new_offset, layout.total_height, height);
+                let _ = InvalidateRect(hwnd, None, true);
+            }
+            LRESULT(0)
+        }
+        WM_SIZE => {
+            let _ = InvalidateRect(hwnd, None, true);
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            if let Some(state) = feed_state(hwnd) {
+                let _ = Box::from_raw(state as *mut CardFeedState);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+static REGISTER_FEED_CLASS: Once = Once::new();
+
+fn register_feed_class_once(hinstance: windows::Win32::Foundation::HMODULE) {
+    REGISTER_FEED_CLASS.call_once(|| unsafe {
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(feed_wnd_proc),
+            hInstance: hinstance.into(),
+            lpszClassName: FEED_CLASS_NAME,
+            hCursor: LoadCursorW(None, windows::Win32::UI::WindowsAndMessaging::IDC_ARROW).unwrap_or_default(),
+            hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(
+                windows::Win32::Graphics::Gdi::GetStockObject(windows::Win32::Graphics::Gdi::WHITE_BRUSH).0,
+            ),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+    });
 }
 
 fn register_class_once(hinstance: windows::Win32::Foundation::HMODULE) {
@@ -497,33 +773,6 @@ fn free_pre_attach_resources_since_wm_destroy_has_no_state_yet(
     }
 }
 
-/// Builds the details-pane text for one alert as labeled fields on their own
-/// lines instead of one run-on sentence -- a plain WC_EDITW control can't
-/// mix font weights, so real bold labels aren't possible here without a
-/// second control; a colon-labeled field-per-line layout is the readable
-/// middle ground that still reads as a structured record at a glance.
-fn format_detail_record(e: &EntrySnapshot) -> String {
-    let mut out = String::new();
-    out.push_str("Severity:  ");
-    out.push_str(&e.level.to_string());
-    out.push_str("\r\n");
-    out.push_str("Time:      ");
-    out.push_str(&e.ts);
-    out.push_str("\r\n");
-    out.push_str("Category:  ");
-    out.push_str(e.category);
-    out.push_str("\r\n\r\n");
-    out.push_str("Message:\r\n");
-    out.push_str(&e.message);
-    out.push_str("\r\n\r\n");
-    out.push_str("Evidence:\r\n");
-    match &e.evidence {
-        Some(ev) => out.push_str(ev),
-        None => out.push_str("No further evidence recorded."),
-    }
-    out
-}
-
 fn create_empty_state_label(hwnd: HWND, hinstance: windows::Win32::Foundation::HMODULE, message: &str) {
     unsafe {
         let mut rect = RECT::default();
@@ -584,7 +833,6 @@ fn create_alert_window_and_pump(
         }
         attach_state(hwnd, WindowState {
             row_kinds: Vec::new(),
-            details: Vec::new(),
             base_font,
             bold_font: empty_state_label_font_stored_in_bold_font_slot_for_wm_destroy_cleanup,
             owner_draw_column_widths: Vec::new(),
@@ -595,99 +843,70 @@ fn create_alert_window_and_pump(
         unsafe {
             let _ = GetClientRect(hwnd, &mut rect);
         }
-        let list_height = (rect.bottom - rect.top) * 2 / 3;
 
-        let list_hwnd = unsafe {
+        register_feed_class_once(hinstance);
+        // Deliberately created WITHOUT WS_VISIBLE: a visible child window
+        // can receive WM_PAINT synchronously from inside CreateWindowExW
+        // itself, before this function returns -- if that happens before
+        // GWLP_USERDATA is attached below, feed_state() reads null and that
+        // first paint silently renders an empty background with no cards
+        // and no scrollbar range, and nothing later forces a second paint
+        // to correct it. Live-witnessed: this was the actual cause of
+        // scrollbar_range_nonzero_for_60_entries and every scroll-dependent
+        // check failing in the one-shot witness even after forcing repaints
+        // from the witness side -- the state was never attached in time for
+        // ANY paint the witness could trigger. Creating hidden, attaching
+        // state, THEN showing (which itself queues a fresh WM_PAINT with
+        // state already present) closes this ordering hole entirely.
+        let feed_hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_CLIENTEDGE,
-                WC_LISTVIEWW,
+                Default::default(),
+                FEED_CLASS_NAME,
                 &HSTRING::from(""),
-                WS_CHILD
-                    | WS_VISIBLE
-                    | WS_BORDER
-                    | WS_VSCROLL
-                    | WINDOW_STYLE(LVS_REPORT)
-                    | WINDOW_STYLE(LVS_SINGLESEL)
-                    | WINDOW_STYLE(LVS_OWNERDRAWFIXED),
+                WS_CHILD | WS_VSCROLL,
                 0,
                 0,
                 rect.right - rect.left,
-                list_height,
+                rect.bottom - rect.top,
                 hwnd,
-                HMENU(LIST_ID as *mut core::ffi::c_void),
+                HMENU(FEED_ID as *mut core::ffi::c_void),
                 hinstance,
                 None,
             )
         };
-        let Ok(list_hwnd) = list_hwnd else {
-            let _ = result_tx.send(Err("CreateWindowExW failed for the alert list".to_string()));
+        let Ok(feed_hwnd) = feed_hwnd else {
+            let _ = result_tx.send(Err("CreateWindowExW failed for the alert feed".to_string()));
             free_pre_attach_resources_since_wm_destroy_has_no_state_yet(hwnd, base_font, icon);
             return;
         };
 
-        unsafe {
-            SendMessageW(
-                list_hwnd,
-                windows::Win32::UI::Controls::LVM_SETEXTENDEDLISTVIEWSTYLE,
-                WPARAM(0),
-                LPARAM((LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES) as isize),
-            );
-            SendMessageW(list_hwnd, WM_SETFONT, WPARAM(base_font.0 as usize), LPARAM(1));
-            set_report_row_height(list_hwnd, ROW_HEIGHT_PX);
-        }
-
-        insert_column(list_hwnd, 0, "Severity", 90);
-        insert_column(list_hwnd, 1, "Time", 150);
-        insert_column(list_hwnd, 2, "Category", 130);
-        insert_column(list_hwnd, 3, "Message", 420);
-
-        let mut row_kinds = Vec::with_capacity(entries.len());
-        let mut details = Vec::with_capacity(entries.len());
-        for (i, e) in entries.iter().enumerate() {
-            insert_row(
-                list_hwnd,
-                i as i32,
-                &[&e.level.to_string(), &e.ts, e.category, &e.message],
-            );
-            row_kinds.push(RowKind::Alert(e.level));
-            details.push(format_detail_record(e));
-        }
-
-        let details_hwnd = unsafe {
-            CreateWindowExW(
-                WS_EX_CLIENTEDGE,
-                windows::Win32::UI::Controls::WC_EDITW,
-                &HSTRING::from(""),
-                WS_CHILD
-                    | WS_VISIBLE
-                    | WS_BORDER
-                    | WS_VSCROLL
-                    | WINDOW_STYLE(windows::Win32::UI::WindowsAndMessaging::ES_MULTILINE as u32)
-                    | WINDOW_STYLE(windows::Win32::UI::WindowsAndMessaging::ES_READONLY as u32)
-                    | WINDOW_STYLE(windows::Win32::UI::WindowsAndMessaging::ES_AUTOVSCROLL as u32),
-                0,
-                list_height,
-                rect.right - rect.left,
-                (rect.bottom - rect.top) - list_height,
-                hwnd,
-                HMENU(DETAILS_ID as *mut core::ffi::c_void),
-                hinstance,
-                None,
-            )
+        // The card feed's own base/bold fonts are owned and freed by the
+        // FEED child window's WM_DESTROY (feed_wnd_proc), NOT by the outer
+        // window's WM_DESTROY -- the outer WindowState below intentionally
+        // holds DEFAULT (invalid) font handles for this branch so the outer
+        // cleanup's DeleteObject calls no-op instead of double-freeing the
+        // same HFONTs the feed window already owns.
+        let feed_bold_font = readable_font(hwnd, BASE_FONT_POINT_SIZE, true);
+        let expanded_len = entries.len();
+        let feed = CardFeedState {
+            entries,
+            expanded: vec![false; expanded_len],
+            scroll_offset_y: 0,
+            base_font,
+            bold_font: feed_bold_font,
         };
-        if let Ok(details_hwnd) = details_hwnd {
-            unsafe {
-                SendMessageW(details_hwnd, WM_SETFONT, WPARAM(base_font.0 as usize), LPARAM(1));
-                let _ = SetWindowTextW(details_hwnd, &HSTRING::from(details.first().cloned().unwrap_or_default().as_str()));
-            }
+        let boxed_feed = Box::new(feed);
+        unsafe {
+            SetWindowLongPtrW(feed_hwnd, GWLP_USERDATA, Box::into_raw(boxed_feed) as isize);
+            let _ = ShowWindow(feed_hwnd, SW_SHOW);
+            let _ = InvalidateRect(feed_hwnd, None, true);
         }
 
         attach_state(hwnd, WindowState {
-            row_kinds,
-            details,
-            base_font,
+            row_kinds: Vec::new(),
+            base_font: windows::Win32::Graphics::Gdi::HFONT::default(),
             bold_font: windows::Win32::Graphics::Gdi::HFONT::default(),
-            owner_draw_column_widths: vec![90, 150, 130, 420],
+            owner_draw_column_widths: Vec::new(),
             caller_owned_destroy_icon: icon,
         });
     }
@@ -808,7 +1027,6 @@ fn create_config_window_and_pump(
 
     attach_state(hwnd, WindowState {
         row_kinds,
-        details: Vec::new(),
         base_font,
         bold_font,
         owner_draw_column_widths: vec![300],
