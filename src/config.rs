@@ -52,6 +52,17 @@ pub struct Config {
     pub file_read_burst_absolute_bytes_per_poll: u64,
     pub file_read_burst_relative_multiplier: f64,
 
+    /// Process names (case-insensitive, matched against sysinfo's reported
+    /// process name) that are KNOWN to legitimately sustain high burst reads
+    /// as their normal operating shape -- sync/backup/indexer tools, per the
+    /// README's own "Known false-positive classes" section. A name match
+    /// raises this process's effective absolute-burst threshold by
+    /// `known_high_throughput_tool_multiplier`, it does NOT exempt the
+    /// process from detection entirely: a name is not the same as the actor
+    /// running under it, so a genuinely extreme read still alerts.
+    pub known_high_throughput_tool_names: Vec<String>,
+    pub known_high_throughput_tool_multiplier: f64,
+
     /// How often to re-poll process list / connection table / firewall
     /// state (seconds). Real event sources are used where the platform
     /// offers them (notify for fs, WMI/ETW on Windows); this interval only
@@ -175,6 +186,16 @@ impl Config {
             // exists to compare against.
             file_read_burst_absolute_bytes_per_poll: 50 * 1024 * 1024,
             file_read_burst_relative_multiplier: 8.0,
+            known_high_throughput_tool_names: vec![
+                "syncthing.exe".to_string(),
+                "syncthing".to_string(),
+                "onedrive.exe".to_string(),
+                "dropbox.exe".to_string(),
+                "backblaze.exe".to_string(),
+                "rsync".to_string(),
+                "robocopy.exe".to_string(),
+            ],
+            known_high_throughput_tool_multiplier: 6.0,
             poll_interval_secs: 3,
             log_path,
         }

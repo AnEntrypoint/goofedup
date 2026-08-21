@@ -25,16 +25,60 @@ struct ReadTracker {
     /// re-flagged as a fresh burst on the very next poll.
     avg_delta: f64,
     alerted_this_burst: bool,
-    /// Consecutive polls (excluding the current one) that already scored as
-    /// a relative spike. A real drive-scanning/harvesting process sustains
-    /// its elevated read rate poll after poll; a legitimate app's burst
-    /// (a page load, a cache write, an update check) is characteristically
-    /// one-shot. Live-witnessed false positives (firefox.exe, Discord.exe)
-    /// were both single-poll spikes against a baseline the app itself had
-    /// only just gone quiet enough to shrink -- requiring persistence
-    /// eliminates that shape while a genuine sustained scan still trips
-    /// this within a couple of poll intervals.
-    consecutive_relative_spikes: u32,
+    /// How many of the last WINDOW_SIZE polls (a fixed-size sliding window,
+    /// not strict back-to-back consecutiveness) scored as a relative spike.
+    /// A real drive-scanning/harvesting process sustains elevated reads
+    /// across a short window; a legitimate app's burst (a page load, a
+    /// cache write, an update check) is characteristically one-shot.
+    /// Live-witnessed false positives (firefox.exe, Discord.exe) were both
+    /// single-poll spikes; requiring persistence within a window eliminates
+    /// that shape. A STRICT back-to-back-with-no-gap requirement was tried
+    /// first and live-witnessed to fail: a real process whose own read
+    /// rounds are separated by even one intervening near-zero-delta poll
+    /// (a genuinely common shape -- disk I/O is bursty, not perfectly
+    /// uniform, even for a real scanner) never accumulates past 1 under
+    /// strict consecutiveness, since a single zero-delta poll resets the
+    /// count to 0 and erases all prior progress. A sliding window tolerates
+    /// that gap while still requiring genuine persistence, not one sample.
+    relative_spike_window: [bool; Self::WINDOW_SIZE],
+    /// Same windowed-persistence requirement as relative_spike_window, but
+    /// for the absolute-burst path. Live-witnessed: this path originally
+    /// had no baseline/persistence gating at all, so a legitimate dev tool
+    /// loading a large plugin file on a single poll (agentplug-runner.exe
+    /// reading hundreds of MB of WASM) alerted immediately every time,
+    /// bypassing the relative path's persistence fix entirely.
+    absolute_burst_window: [bool; Self::WINDOW_SIZE],
+    window_pos: usize,
+}
+
+impl ReadTracker {
+    const WINDOW_SIZE: usize = 4;
+    const REQUIRED_SPIKES_IN_WINDOW: usize = 2;
+
+    fn new(seed_total_read: u64) -> Self {
+        Self {
+            last_total_read: seed_total_read,
+            avg_delta: 0.0,
+            alerted_this_burst: false,
+            relative_spike_window: [false; Self::WINDOW_SIZE],
+            absolute_burst_window: [false; Self::WINDOW_SIZE],
+            window_pos: 0,
+        }
+    }
+
+    fn record_poll(&mut self, was_relative_spike: bool, was_absolute_burst: bool) {
+        self.relative_spike_window[self.window_pos] = was_relative_spike;
+        self.absolute_burst_window[self.window_pos] = was_absolute_burst;
+        self.window_pos = (self.window_pos + 1) % Self::WINDOW_SIZE;
+    }
+
+    fn relative_spike_count_in_window(&self) -> usize {
+        self.relative_spike_window.iter().filter(|&&x| x).count()
+    }
+
+    fn absolute_burst_count_in_window(&self) -> usize {
+        self.absolute_burst_window.iter().filter(|&&x| x).count()
+    }
 }
 
 pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
@@ -143,12 +187,7 @@ fn check_read_burst(
     #[cfg(not(target_os = "linux"))]
     let total_read = total_read_bytes(pid, p);
 
-    let tracker = trackers.entry(pid).or_insert_with(|| ReadTracker {
-        last_total_read: total_read,
-        avg_delta: 0.0,
-        alerted_this_burst: false,
-        consecutive_relative_spikes: 0,
-    });
+    let tracker = trackers.entry(pid).or_insert_with(|| ReadTracker::new(total_read));
 
     // A process's disk_usage() can wrap or reset (e.g. genuinely restarted
     // under the same PID between polls on some platforms) -- treat a
@@ -158,12 +197,49 @@ fn check_read_burst(
     tracker.last_total_read = total_read;
 
     if delta == 0 {
-        tracker.alerted_this_burst = false;
-        tracker.consecutive_relative_spikes = 0;
+        // Record a non-spike poll into the window rather than wiping the
+        // tracker's whole history -- a real process's read rounds are
+        // often separated by an intervening near-zero-delta poll (bursty
+        // disk I/O, not perfectly uniform), live-witnessed via
+        // _diag_syncthing_deltas.rs: a strict "any zero-delta poll erases
+        // all prior progress" rule meant a real sustained multi-round
+        // burst pattern never accumulated past a single spike, since each
+        // round's own inter-round pause produced an intervening zero-delta
+        // poll that reset the count every time.
+        tracker.record_poll(false, false);
+        if tracker.relative_spike_count_in_window() < ReadTracker::REQUIRED_SPIKES_IN_WINDOW
+            && tracker.absolute_burst_count_in_window() < ReadTracker::REQUIRED_SPIKES_IN_WINDOW
+        {
+            tracker.alerted_this_burst = false;
+        }
         return;
     }
 
-    let is_absolute_burst = delta >= cfg.file_read_burst_absolute_bytes_per_poll;
+    let name = p.name().to_string_lossy().to_string();
+    let name_lower = name.to_lowercase();
+    let is_known_high_throughput_tool =
+        cfg.known_high_throughput_tool_names.iter().any(|n| n.to_lowercase() == name_lower);
+    let effective_absolute_threshold = if is_known_high_throughput_tool {
+        (cfg.file_read_burst_absolute_bytes_per_poll as f64 * cfg.known_high_throughput_tool_multiplier) as u64
+    } else {
+        cfg.file_read_burst_absolute_bytes_per_poll
+    };
+
+    // Live-witnessed: a process whose own baseline is already substantial
+    // (python.exe reading 60MB against a 13-24MB/poll established average)
+    // is not anomalous relative to ITSELF just because the raw byte count
+    // clears the absolute floor -- the absolute check exists to catch a
+    // scanner even on its very first observation (no baseline yet), not to
+    // re-flag a consistently high-throughput process on every poll near its
+    // own normal level. A read within a modest multiple of the process's
+    // own established baseline is excluded from the absolute-burst check
+    // even if it clears the raw threshold.
+    const BASELINE_RELATIVE_TO_ABSOLUTE_EXEMPTION_MULTIPLIER: f64 = 3.0;
+    let absolute_reading_is_within_own_established_baseline = tracker.avg_delta > 0.0
+        && (delta as f64) < tracker.avg_delta * BASELINE_RELATIVE_TO_ABSOLUTE_EXEMPTION_MULTIPLIER;
+
+    let single_poll_absolute_burst = delta >= effective_absolute_threshold
+        && !absolute_reading_is_within_own_established_baseline;
 
     // A live-witnessed false-positive source: a low EMA baseline built up
     // during a genuinely quiet stretch (an idle browser tab) makes any
@@ -175,24 +251,25 @@ fn check_read_burst(
     let single_poll_relative_spike = tracker.avg_delta > BASELINE_WARM_UP_FLOOR
         && (delta as f64) >= tracker.avg_delta * cfg.file_read_burst_relative_multiplier;
 
-    if single_poll_relative_spike {
-        tracker.consecutive_relative_spikes += 1;
-    } else {
-        tracker.consecutive_relative_spikes = 0;
-    }
+    tracker.record_poll(single_poll_relative_spike, single_poll_absolute_burst);
 
     // A real drive-scanning/harvesting process sustains its elevated read
-    // rate; a legitimate app's burst (page load, cache write, update check)
-    // is characteristically one-shot. Requiring the spike to repeat on the
-    // very next poll too -- not a single sample -- is what actually
-    // distinguishes the two shapes, live-witnessed against real recorded
-    // firefox.exe/Discord.exe false positives (both single-poll spikes).
-    const REQUIRED_CONSECUTIVE_SPIKES: u32 = 2;
-    let is_relative_spike = tracker.consecutive_relative_spikes >= REQUIRED_CONSECUTIVE_SPIKES;
+    // rate across a short window; a legitimate app's burst (page load,
+    // cache write, update check, a dev tool loading a large plugin file)
+    // is characteristically one-shot. Requiring the spike to recur within
+    // the last WINDOW_SIZE polls -- not a single sample, and not requiring
+    // strict zero-gap consecutiveness -- is what actually distinguishes the
+    // two shapes, live-witnessed against real recorded firefox.exe/
+    // Discord.exe/agentplug-runner.exe/python.exe false positives (all
+    // single-poll) while a genuine multi-round sustained burst (even with
+    // an intervening quiet poll between rounds) still trips this. The
+    // absolute path originally had no persistence requirement at all,
+    // completely bypassing this protection -- both paths now require it.
+    let is_relative_spike = tracker.relative_spike_count_in_window() >= ReadTracker::REQUIRED_SPIKES_IN_WINDOW;
+    let is_absolute_burst = tracker.absolute_burst_count_in_window() >= ReadTracker::REQUIRED_SPIKES_IN_WINDOW;
 
     if (is_absolute_burst || is_relative_spike) && !tracker.alerted_this_burst {
         tracker.alerted_this_burst = true;
-        let name = p.name().to_string_lossy().to_string();
         let exe_path = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
         let reason = if is_absolute_burst && is_relative_spike {
             "both an absolute burst and a sustained spike versus its own baseline"
@@ -232,7 +309,7 @@ fn check_read_burst(
     // itself continues, or a sustained scan becomes progressively HARDER to
     // detect the longer it runs, the opposite of the intended behavior.
     const EMA_ALPHA: f64 = 0.2;
-    if !single_poll_relative_spike && !is_absolute_burst {
+    if !single_poll_relative_spike && !single_poll_absolute_burst {
         tracker.avg_delta = if tracker.avg_delta == 0.0 {
             delta as f64
         } else {
