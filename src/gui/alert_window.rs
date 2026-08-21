@@ -1,6 +1,6 @@
-use crate::gui::history::EntrySnapshot;
+use crate::gui::history::{GroupedEntry, History};
 use crate::gui::icon::{shield_hicon, IconState};
-use std::sync::Once;
+use std::sync::{Arc, Once};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -56,6 +56,16 @@ const CARD_BORDER: (u8, u8, u8) = (226, 232, 240);
 const CARD_BG: (u8, u8, u8) = (255, 255, 255);
 const CARD_HOVER_HINT_FG: (u8, u8, u8) = (148, 163, 184);
 
+const CARD_ACKNOWLEDGED_BORDER: (u8, u8, u8) = (226, 232, 240);
+const CARD_ACKNOWLEDGED_BG: (u8, u8, u8) = (248, 250, 252);
+const CARD_ACKNOWLEDGED_BADGE: (u8, u8, u8) = (148, 163, 184);
+const CARD_ACKNOWLEDGED_FG: (u8, u8, u8) = (100, 116, 139);
+const MARK_SAFE_BG: (u8, u8, u8) = (241, 245, 249);
+const MARK_SAFE_FG: (u8, u8, u8) = (51, 65, 85);
+const MARK_SAFE_ACKED_FG: (u8, u8, u8) = (148, 163, 184);
+const MARK_SAFE_BUTTON_WIDTH: i32 = 84;
+const MARK_SAFE_BUTTON_HEIGHT: i32 = 20;
+
 const CRITICAL_FG: (u8, u8, u8) = (153, 27, 27);
 const WARN_FG: (u8, u8, u8) = (146, 64, 14);
 const HEADER_BG: (u8, u8, u8) = (238, 242, 247);
@@ -88,27 +98,20 @@ struct WindowState {
     caller_owned_destroy_icon: HICON,
 }
 
-/// Card-feed state for the alert history view: one card per entry, each
-/// independently expandable. Layout (each card's y-position and height) is
-/// ALWAYS recomputed fresh from `entries`/`expanded`/`viewport_width` --
-/// never cached across a toggle -- so a click on any card after another
-/// card's expand/collapse always hit-tests against the current, correct
-/// post-reflow position (mut-card-hit-test-post-reflow).
 struct CardFeedState {
-    entries: Vec<EntrySnapshot>,
+    entries: Vec<GroupedEntry>,
     expanded: Vec<bool>,
     scroll_offset_y: i32,
     base_font: windows::Win32::Graphics::Gdi::HFONT,
     bold_font: windows::Win32::Graphics::Gdi::HFONT,
+    history: Arc<History>,
 }
 
 struct CardLayout {
-    /// Top y-coordinate of each card in unscrolled content space (i.e. as if
-    /// scroll_offset_y were 0) -- subtract scroll_offset_y to get the actual
-    /// on-screen position for painting/hit-testing.
-    card_top: Vec<i32>,
+    card_top_in_unscrolled_content_space: Vec<i32>,
     card_height: Vec<i32>,
     total_height: i32,
+    mark_safe_button_y_in_unscrolled_content_space: Vec<Option<(i32, i32)>>,
 }
 
 fn measure_wrapped_text_height(hdc: windows::Win32::Graphics::Gdi::HDC, text: &str, width: i32) -> i32 {
@@ -133,29 +136,53 @@ fn compute_card_layout(
     feed: &CardFeedState,
     viewport_width: i32,
 ) -> CardLayout {
-    let mut card_top = Vec::with_capacity(feed.entries.len());
+    let mut card_top_in_unscrolled_content_space = Vec::with_capacity(feed.entries.len());
     let mut card_height = Vec::with_capacity(feed.entries.len());
+    let mut mark_safe_button_y_in_unscrolled_content_space = Vec::with_capacity(feed.entries.len());
     let mut y = CARD_MARGIN_TOP;
     let text_width = (viewport_width - CARD_MARGIN_X * 2 - CARD_PADDING * 2).max(40);
+    let headline_width_reserved_for_mark_safe_button = MARK_SAFE_BUTTON_WIDTH + 8;
 
     for (i, e) in feed.entries.iter().enumerate() {
-        card_top.push(y);
-        // Headline (bold, single line, may itself wrap on a narrow window)
-        // + timestamp/category subline (single line) + optional expanded
-        // evidence block (wrapped multi-line).
-        let headline_h = measure_wrapped_text_height(hdc, &e.message, text_width).max(18);
+        card_top_in_unscrolled_content_space.push(y);
+        let show_mark_safe = e.is_group() && !e.is_acknowledged_group();
+        let headline_text_width = if show_mark_safe {
+            (text_width - headline_width_reserved_for_mark_safe_button).max(20)
+        } else {
+            text_width
+        };
+        let headline_h = measure_wrapped_text_height(hdc, &e.headline(), headline_text_width).max(18);
         let subline_h = 18;
-        let mut h = CARD_PADDING * 2 + headline_h + 4 + subline_h;
+        let mut h = CARD_PADDING * 2 + headline_h.max(MARK_SAFE_BUTTON_HEIGHT) + 4 + subline_h;
         if feed.expanded.get(i).copied().unwrap_or(false) {
-            let detail_text = e.evidence.as_deref().unwrap_or("No further evidence recorded.");
-            let detail_h = measure_wrapped_text_height(hdc, detail_text, text_width).max(18);
+            let detail_h = measure_wrapped_text_height(hdc, &e.detail_text(), text_width).max(18);
             h += 8 + detail_h;
         }
         card_height.push(h);
+
+        mark_safe_button_y_in_unscrolled_content_space.push(if show_mark_safe {
+            let btn_top = y + CARD_PADDING;
+            Some((btn_top, btn_top + MARK_SAFE_BUTTON_HEIGHT))
+        } else {
+            None
+        });
+
         y += h + CARD_GAP;
     }
     let total_height = if feed.entries.is_empty() { 0 } else { (y - CARD_GAP + CARD_MARGIN_TOP).max(0) };
-    CardLayout { card_top, card_height, total_height }
+    CardLayout {
+        card_top_in_unscrolled_content_space,
+        card_height,
+        total_height,
+        mark_safe_button_y_in_unscrolled_content_space,
+    }
+}
+
+fn mark_safe_button_rect(layout: &CardLayout, i: usize, viewport_width: i32) -> Option<RECT> {
+    let (top, bottom) = layout.mark_safe_button_y_in_unscrolled_content_space.get(i).copied().flatten()?;
+    let right = viewport_width - CARD_MARGIN_X - CARD_PADDING;
+    let left = right - MARK_SAFE_BUTTON_WIDTH;
+    Some(RECT { left, top, right, bottom })
 }
 
 fn rgb(c: (u8, u8, u8)) -> COLORREF {
@@ -377,7 +404,7 @@ unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 let _ = DeleteObject(bg_brush);
 
                 for (i, e) in state.entries.iter().enumerate() {
-                    let top = layout.card_top[i] - offset;
+                    let top = layout.card_top_in_unscrolled_content_space[i] - offset;
                     let h = layout.card_height[i];
                     let bottom = top + h;
                     // mut-card-paint-viewport-clip: skip any card whose rect
@@ -393,14 +420,24 @@ unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                         bottom,
                     };
 
-                    let (badge_color, accent_fg) = match e.level {
-                        crate::alert::Level::Critical => (CRITICAL_BADGE, CRITICAL_FG),
-                        crate::alert::Level::Warn => (WARN_BADGE, WARN_FG),
-                        crate::alert::Level::Info => (INFO_BADGE, DESCRIPTION_FG),
+                    let acked = e.is_acknowledged_group();
+                    let (badge_color, accent_fg) = if acked {
+                        (CARD_ACKNOWLEDGED_BADGE, CARD_ACKNOWLEDGED_FG)
+                    } else {
+                        match e.level() {
+                            crate::alert::Level::Critical => (CRITICAL_BADGE, CRITICAL_FG),
+                            crate::alert::Level::Warn => (WARN_BADGE, WARN_FG),
+                            crate::alert::Level::Info => (INFO_BADGE, DESCRIPTION_FG),
+                        }
+                    };
+                    let (card_bg, card_border) = if acked {
+                        (CARD_ACKNOWLEDGED_BG, CARD_ACKNOWLEDGED_BORDER)
+                    } else {
+                        (CARD_BG, CARD_BORDER)
                     };
 
-                    let card_brush = CreateSolidBrush(rgb(CARD_BG));
-                    let border_pen = CreatePen(PS_SOLID, 1, rgb(CARD_BORDER));
+                    let card_brush = CreateSolidBrush(rgb(card_bg));
+                    let border_pen = CreatePen(PS_SOLID, 1, rgb(card_border));
                     let old_brush = SelectObject(hdc, card_brush);
                     let old_pen = SelectObject(hdc, border_pen);
                     let _ = RoundRect(hdc, card_rect.left, card_rect.top, card_rect.right, card_rect.bottom, 8, 8);
@@ -423,43 +460,84 @@ unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                     let _ = DeleteObject(badge_brush);
 
                     let text_left = card_rect.left + CARD_PADDING + CARD_BADGE_DIAMETER + 8;
-                    let text_right = card_rect.right - CARD_PADDING;
+                    let show_mark_safe = e.is_group() && !acked;
+                    let text_right = if show_mark_safe {
+                        card_rect.right - CARD_PADDING - MARK_SAFE_BUTTON_WIDTH - 8
+                    } else {
+                        card_rect.right - CARD_PADDING
+                    };
 
+                    let headline = e.headline();
                     let old_font = SelectObject(hdc, state.bold_font);
-                    SetTextColor(hdc, rgb((15, 23, 42)));
+                    SetTextColor(hdc, rgb(if acked { CARD_ACKNOWLEDGED_FG } else { (15, 23, 42) }));
                     let _ = SetBkMode(hdc, TRANSPARENT);
                     let text_width = (text_right - text_left).max(10);
-                    let headline_h = measure_wrapped_text_height(hdc, &e.message, text_width).max(18);
+                    let headline_h = measure_wrapped_text_height(hdc, &headline, text_width).max(18);
                     let mut headline_rect = RECT {
                         left: text_left,
                         top: card_rect.top + CARD_PADDING,
                         right: text_right,
                         bottom: card_rect.top + CARD_PADDING + headline_h,
                     };
-                    let mut headline_wide: Vec<u16> = e.message.encode_utf16().collect();
+                    let mut headline_wide: Vec<u16> = headline.encode_utf16().collect();
                     DrawTextW(hdc, &mut headline_wide, &mut headline_rect, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+
+                    if show_mark_safe {
+                        if let Some(btn) = mark_safe_button_rect(&layout, i, width) {
+                            let btn_top = btn.top - offset;
+                            let btn_bottom = btn.bottom - offset;
+                            let btn_brush = CreateSolidBrush(rgb(MARK_SAFE_BG));
+                            let btn_pen = CreatePen(PS_SOLID, 1, rgb(CARD_BORDER));
+                            let old_btn_brush = SelectObject(hdc, btn_brush);
+                            let old_btn_pen = SelectObject(hdc, btn_pen);
+                            let _ = RoundRect(hdc, btn.left, btn_top, btn.right, btn_bottom, 4, 4);
+                            SelectObject(hdc, old_btn_brush);
+                            SelectObject(hdc, old_btn_pen);
+                            let _ = DeleteObject(btn_brush);
+                            let _ = DeleteObject(btn_pen);
+
+                            SelectObject(hdc, state.base_font);
+                            SetTextColor(hdc, rgb(MARK_SAFE_FG));
+                            let mut btn_text_rect = RECT { left: btn.left, top: btn_top, right: btn.right, bottom: btn_bottom };
+                            let mut btn_wide: Vec<u16> = "Mark safe".encode_utf16().collect();
+                            DrawTextW(hdc, &mut btn_wide, &mut btn_text_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                        }
+                    } else if acked && e.is_group() {
+                        SelectObject(hdc, state.base_font);
+                        SetTextColor(hdc, rgb(MARK_SAFE_ACKED_FG));
+                        let mut label_rect = RECT {
+                            left: card_rect.right - CARD_PADDING - MARK_SAFE_BUTTON_WIDTH,
+                            top: card_rect.top + CARD_PADDING,
+                            right: card_rect.right - CARD_PADDING,
+                            bottom: card_rect.top + CARD_PADDING + MARK_SAFE_BUTTON_HEIGHT,
+                        };
+                        let mut label_wide: Vec<u16> = "Marked safe".encode_utf16().collect();
+                        DrawTextW(hdc, &mut label_wide, &mut label_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                    }
 
                     SelectObject(hdc, state.base_font);
                     SetTextColor(hdc, rgb(accent_fg));
-                    let subline = format!("{}   \u{2022}   {}", e.ts, e.category);
+                    let subline = format!("{}   \u{2022}   {}", e.newest_member_ts(), e.category());
                     let mut subline_rect = RECT {
                         left: text_left,
                         top: headline_rect.bottom + 4,
-                        right: text_right,
+                        right: card_rect.right - CARD_PADDING,
                         bottom: headline_rect.bottom + 4 + 18,
                     };
                     let mut subline_wide: Vec<u16> = subline.encode_utf16().collect();
                     DrawTextW(hdc, &mut subline_wide, &mut subline_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 
                     let is_expanded = state.expanded.get(i).copied().unwrap_or(false);
+                    let full_text_right = card_rect.right - CARD_PADDING;
+                    let full_text_width = (full_text_right - text_left).max(10);
                     if is_expanded {
-                        let detail_text = e.evidence.as_deref().unwrap_or("No further evidence recorded.");
+                        let detail_text = e.detail_text();
                         SetTextColor(hdc, rgb((51, 65, 85)));
-                        let detail_h = measure_wrapped_text_height(hdc, detail_text, text_width).max(18);
+                        let detail_h = measure_wrapped_text_height(hdc, &detail_text, full_text_width).max(18);
                         let mut detail_rect = RECT {
                             left: text_left,
                             top: subline_rect.bottom + 8,
-                            right: text_right,
+                            right: full_text_right,
                             bottom: subline_rect.bottom + 8 + detail_h,
                         };
                         let mut detail_wide: Vec<u16> = detail_text.encode_utf16().collect();
@@ -468,9 +546,9 @@ unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                         SetTextColor(hdc, rgb(CARD_HOVER_HINT_FG));
                         let hint = "click to expand";
                         let mut hint_rect = RECT {
-                            left: text_right - 110,
+                            left: full_text_right - 110,
                             top: subline_rect.top,
-                            right: text_right,
+                            right: full_text_right,
                             bottom: subline_rect.bottom,
                         };
                         let mut hint_wide: Vec<u16> = hint.encode_utf16().collect();
@@ -498,19 +576,34 @@ unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 let layout = compute_card_layout(hdc, state, width);
                 ReleaseDC(hwnd, hdc);
                 let offset = state.scroll_offset_y;
-                for i in 0..state.entries.len() {
-                    let top = layout.card_top[i] - offset;
-                    let bottom = top + layout.card_height[i];
-                    if y >= top && y < bottom && x >= 0 && x < width {
-                        // mut-card-hit-test-post-reflow: toggling recomputes
-                        // layout fresh on the NEXT paint/hit-test, never
-                        // reuses this call's `layout` for anything after
-                        // the toggle.
-                        if let Some(v) = state.expanded.get_mut(i) {
-                            *v = !*v;
+
+                let clicked_mark_safe_index = (0..state.entries.len()).find(|&i| {
+                    mark_safe_button_rect(&layout, i, width).is_some_and(|btn| {
+                        let btn_top = btn.top - offset;
+                        let btn_bottom = btn.bottom - offset;
+                        y >= btn_top && y < btn_bottom && x >= btn.left && x < btn.right
+                    })
+                });
+
+                if let Some(i) = clicked_mark_safe_index {
+                    if let Some((category, key)) = state.entries[i].acknowledgeable_group_identity() {
+                        state.history.acknowledge_group(category, key);
+                    }
+                    let fresh = state.history.grouped_snapshot();
+                    state.expanded = vec![false; fresh.len()];
+                    state.entries = fresh;
+                    let _ = InvalidateRect(hwnd, None, true);
+                } else {
+                    for i in 0..state.entries.len() {
+                        let top = layout.card_top_in_unscrolled_content_space[i] - offset;
+                        let bottom = top + layout.card_height[i];
+                        if y >= top && y < bottom && x >= 0 && x < width {
+                            if let Some(v) = state.expanded.get_mut(i) {
+                                *v = !*v;
+                            }
+                            let _ = InvalidateRect(hwnd, None, true);
+                            break;
                         }
-                        let _ = InvalidateRect(hwnd, None, true);
-                        break;
                     }
                 }
             }
@@ -796,9 +889,10 @@ fn create_empty_state_label(hwnd: HWND, hinstance: windows::Win32::Foundation::H
 
 fn create_alert_window_and_pump(
     title: &str,
-    entries: Vec<EntrySnapshot>,
+    history: Arc<History>,
     result_tx: std::sync::mpsc::Sender<Result<(), String>>,
 ) {
+    let entries = history.grouped_snapshot();
     let hinstance = match unsafe { GetModuleHandleW(None) } {
         Ok(h) => h,
         Err(e) => {
@@ -894,6 +988,7 @@ fn create_alert_window_and_pump(
             scroll_offset_y: 0,
             base_font,
             bold_font: feed_bold_font,
+            history,
         };
         let boxed_feed = Box::new(feed);
         unsafe {
@@ -1044,11 +1139,10 @@ fn create_config_window_and_pump(
     }
 }
 
-pub fn show_alerts(title: &str, entries: &[EntrySnapshot]) -> Result<(), String> {
+pub fn show_alerts(title: &str, history: Arc<History>) -> Result<(), String> {
     let title = title.to_string();
-    let entries = entries.to_vec();
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-    std::thread::spawn(move || create_alert_window_and_pump(&title, entries, tx));
+    std::thread::spawn(move || create_alert_window_and_pump(&title, history, tx));
     rx.recv().unwrap_or_else(|_| Err("alert window thread exited before signaling readiness".to_string()))
 }
 

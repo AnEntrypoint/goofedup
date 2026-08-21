@@ -230,8 +230,8 @@ fn tooltip_text(history: &History, paused: bool) -> String {
     }
 }
 
-fn open_alert_window(alerts: &AlertSink, title: &str, history: &History) {
-    if let Err(reason) = alert_window::show_alerts(title, &history.entries_snapshot()) {
+fn open_alert_window(alerts: &AlertSink, title: &str, history: &Arc<History>) {
+    if let Err(reason) = alert_window::show_alerts(title, Arc::clone(history)) {
         alerts.critical(
             "goofedup-gui",
             "could not open the alert viewer",
