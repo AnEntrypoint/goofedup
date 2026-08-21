@@ -415,27 +415,29 @@ fn inspect_new_process(
     if is_watched_interp {
         if let Some(v) = score_command_line(&cmdline) {
             let head: String = cmdline.chars().take(200).collect();
-            let evidence = format!("score={} reasons=[{}] cmdline_head={head}", v.score, v.reasons.join("; "));
-            // score_command_line itself is untouched by this check -- the
-            // content-based heuristic stays exactly as sensitive as before.
-            // Only the ALERT SEVERITY changes, and only when the immediate
-            // parent process matches a small explicit trusted-dispatcher
-            // list: a known name is not the same as a trusted actor, so a
-            // genuinely malicious payload spawned under a spoofed/matching
-            // parent name still gets reported, just at WARN instead of
-            // silently passing through unflagged.
+            // Severity stays CRITICAL unconditionally -- a c2-shaped command
+            // line is a severe signal regardless of who spawned it, since a
+            // real compromise could just as easily run under a parent name
+            // that happens to match a trusted dispatcher. Ancestry is still
+            // useful triage context, so it's appended to the evidence text
+            // instead of ever changing severity: a known name is not the
+            // same as a trusted actor, and the alert must never be quieter
+            // for a payload that merely looks like it came from a familiar
+            // process.
             let parent_is_known_automation = ancestor_names(sys, p, ANCESTOR_WALK_MAX_DEPTH)
                 .iter()
                 .any(|ancestor| {
                     let ancestor_lower = ancestor.to_lowercase();
                     cfg.known_automation_parent_names.iter().any(|n| n.to_lowercase() == ancestor_lower)
                 });
-            let message = format!("'{name}' (PID {pid}) spawned with a command line shaped like an obfuscated C2 payload");
-            if parent_is_known_automation {
-                alerts.warn("c2-shaped-process", message, evidence);
+            let parent_note = if parent_is_known_automation {
+                "parent=recognized-dev-tool-ancestor"
             } else {
-                alerts.critical("c2-shaped-process", message, evidence);
-            }
+                "parent=unrecognized"
+            };
+            let evidence = format!("score={} reasons=[{}] {parent_note} cmdline_head={head}", v.score, v.reasons.join("; "));
+            let message = format!("'{name}' (PID {pid}) spawned with a command line shaped like an obfuscated C2 payload");
+            alerts.critical("c2-shaped-process", message, evidence);
         }
     }
 }

@@ -68,11 +68,12 @@ pub struct Config {
     /// operating shape -- AI-assistant/automation harnesses that pass
     /// scripts via -EncodedCommand to sidestep shell-escaping, per the
     /// README's own "Known false-positive classes" section (the exact shape
-    /// a real attacker's living-off-the-land technique uses too, so this
-    /// does NOT change what score_command_line flags -- only the severity
-    /// once flagged). A match downgrades c2-shaped-process from CRITICAL to
-    /// WARN; it does not suppress the alert, since a trusted parent name is
-    /// not the same as a trusted actor running under it.
+    /// a real attacker's living-off-the-land technique uses too). A match
+    /// does NOT change severity or suppress the alert -- c2-shaped-process
+    /// always fires CRITICAL regardless of parent, since a genuinely
+    /// malicious payload could run under a parent name that happens to
+    /// match this list too. A match is noted in the evidence text as triage
+    /// context only.
     pub known_automation_parent_names: Vec<String>,
 
     /// How often to re-poll process list / connection table / firewall
