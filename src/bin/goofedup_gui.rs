@@ -42,6 +42,7 @@ fn main() {
                 return;
             }
             history.push(a);
+            alert_window::notify_new_alert();
             if matches!(a.level, Level::Warn | Level::Critical) {
                 toast::show(&format!("goofedup: {}", a.category), &a.message, open_history_request);
             }

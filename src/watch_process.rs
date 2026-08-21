@@ -424,12 +424,12 @@ fn inspect_new_process(
             // genuinely malicious payload spawned under a spoofed/matching
             // parent name still gets reported, just at WARN instead of
             // silently passing through unflagged.
-            let parent_is_known_automation = parent_name(sys, p)
-                .map(|parent_name| {
-                    let parent_lower = parent_name.to_lowercase();
-                    cfg.known_automation_parent_names.iter().any(|n| n.to_lowercase() == parent_lower)
-                })
-                .unwrap_or(false);
+            let parent_is_known_automation = ancestor_names(sys, p, ANCESTOR_WALK_MAX_DEPTH)
+                .iter()
+                .any(|ancestor| {
+                    let ancestor_lower = ancestor.to_lowercase();
+                    cfg.known_automation_parent_names.iter().any(|n| n.to_lowercase() == ancestor_lower)
+                });
             let message = format!("'{name}' (PID {pid}) spawned with a command line shaped like an obfuscated C2 payload");
             if parent_is_known_automation {
                 alerts.warn("c2-shaped-process", message, evidence);
@@ -440,8 +440,25 @@ fn inspect_new_process(
     }
 }
 
-fn parent_name(sys: &System, p: &sysinfo::Process) -> Option<String> {
-    let parent_pid = p.parent()?;
-    let parent = sys.process(parent_pid)?;
-    Some(parent.name().to_string_lossy().to_string())
+// A live-witnessed real dispatch chain (this session's own AI-assistant
+// tool-dispatch path) is bash.exe (nested 3 deep) <- claude.exe <- cmd.exe
+// <- explorer.exe -- the immediate parent of a flagged interpreter is
+// routinely an intermediate shell, not a directly-trusted top-level
+// dispatcher, so checking only p.parent() (one level) almost never matches.
+// Walk a small bounded number of ancestor levels instead; the bound exists
+// so this stays cheap per-alert regardless of process-tree depth, not
+// because a real Windows process tree could cycle.
+const ANCESTOR_WALK_MAX_DEPTH: u32 = 4;
+
+fn ancestor_names(sys: &System, p: &sysinfo::Process, max_depth: u32) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut current_pid = p.pid();
+    for _ in 0..max_depth {
+        let Some(current) = sys.process(current_pid) else { break };
+        let Some(parent_pid) = current.parent() else { break };
+        let Some(parent) = sys.process(parent_pid) else { break };
+        names.push(parent.name().to_string_lossy().to_string());
+        current_pid = parent_pid;
+    }
+    names
 }

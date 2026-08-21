@@ -1,6 +1,6 @@
 use crate::gui::history::{GroupedEntry, History};
 use crate::gui::icon::{shield_hicon, IconState};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -21,8 +21,9 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMessageW, GetWindowLongPtrW, HICON, LoadCursorW, PostQuitMessage, RegisterClassW,
-    SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, TranslateMessage,
+    GetMessageW, GetWindowLongPtrW, HICON, LoadCursorW, PostMessageW, PostQuitMessage,
+    RegisterClassW, SendMessageW, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    TranslateMessage,
     CW_USEDEFAULT, GWLP_USERDATA, HMENU, ICON_BIG, ICON_SMALL, MSG, SB_BOTTOM, SB_VERT,
     SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP,
     SCROLLINFO, SIF_PAGE, SIF_POS, SIF_RANGE, SW_SHOW, SWP_NOZORDER, WINDOW_STYLE, WM_CLOSE,
@@ -47,6 +48,45 @@ const EMPTY_LABEL_ID: i32 = 1003;
 const FEED_ID: i32 = 1004;
 
 const FEED_CLASS_NAME: PCWSTR = w!("GoofedupAlertFeed");
+
+// A private-range custom message telling the feed window new data may be
+// available in the History it already holds -- posted from whatever
+// watcher thread AlertSink::emit runs on, handled on the feed window's own
+// message-pump thread. WM_APP (0x8000) is the documented start of the
+// range reserved for private application messages.
+const WM_APP: u32 = 0x8000;
+const WM_GOOFEDUP_NEW_ALERT: u32 = WM_APP + 1;
+
+// The currently-open feed window's HWND, if any -- set right after the
+// feed child window is created and shown, cleared on its own WM_DESTROY.
+// A watcher thread calling notify_new_alert() reads this to know where to
+// PostMessageW; None (no window open) is the common case and is a cheap
+// no-op, not an error.
+//
+// A single slot, deliberately: if a user somehow opens two feed windows at
+// once (no per-window single-instance guard exists), the second one to
+// open overwrites this slot and the first silently reverts to pre-refresh
+// (close-and-reopen-to-see-new-alerts) behavior for the rest of its
+// lifetime -- accepted as a rare, non-corrupting, self-correcting-on-close
+// edge case rather than building multi-window fan-out (a set of HWNDs) for
+// it.
+static OPEN_FEED_HWND: Mutex<Option<isize>> = Mutex::new(None);
+
+/// Called from AlertSink's on_alert callback (a watcher thread) whenever a
+/// new alert lands, regardless of whether the alert window is currently
+/// open. A no-op if it isn't -- PostMessageW to a HWND that no longer
+/// exists (or was never opened) returns FALSE/ERROR_INVALID_WINDOW_HANDLE,
+/// never a crash or a delivery to an unrelated recycled handle, per the
+/// documented Win32 contract, so no extra liveness check is needed beyond
+/// holding the lock briefly to read the slot.
+pub fn notify_new_alert() {
+    let hwnd = OPEN_FEED_HWND.lock().ok().and_then(|g| *g);
+    if let Some(raw) = hwnd {
+        unsafe {
+            let _ = PostMessageW(HWND(raw as *mut core::ffi::c_void), WM_GOOFEDUP_NEW_ALERT, WPARAM(0), LPARAM(0));
+        }
+    }
+}
 const CARD_MARGIN_X: i32 = 12;
 const CARD_MARGIN_TOP: i32 = 10;
 const CARD_GAP: i32 = 8;
@@ -361,6 +401,71 @@ unsafe fn feed_state(hwnd: HWND) -> Option<&'static mut CardFeedState> {
     }
 }
 
+/// A cheap content fingerprint for deciding whether a fresh grouped_snapshot()
+/// differs from what's currently rendered -- count, plus per-entry category
+/// and either the group's member count or the single entry's message, joined
+/// into one string. Not a full structural comparison, but sufficient to tell
+/// "nothing changed" (skip repaint) from "something changed" (repaint), which
+/// is all a refresh decision needs.
+fn entries_fingerprint(entries: &[GroupedEntry]) -> String {
+    let mut out = String::with_capacity(entries.len() * 24);
+    for e in entries {
+        out.push_str(e.category());
+        out.push('|');
+        match e {
+            GroupedEntry::Single(s) => {
+                out.push_str(&s.message);
+            }
+            GroupedEntry::Group { count, acknowledged, .. } => {
+                out.push_str(&count.to_string());
+                out.push(if *acknowledged { 'A' } else { 'a' });
+            }
+        }
+        out.push(';');
+    }
+    out
+}
+
+/// Re-derives the feed's entries from its live History and repaints ONLY if
+/// the content actually changed (mut-realtime-refresh-no-repaint-when-
+/// unchanged). Preserves scroll_offset_y as-is (a byte position, unaffected
+/// by which entries exist) and re-applies expanded=true to whichever new
+/// entries share a GROUP's (category, key) identity with a currently-
+/// expanded entry (mut-realtime-refresh-preserves-scroll-and-expand-state)
+/// -- a Single entry has no identity that survives a refresh, so an
+/// expanded Single may legitimately re-collapse; only grouped cards have a
+/// stable identity to carry forward.
+unsafe fn refresh_feed_from_history(hwnd: HWND) {
+    let Some(state) = feed_state(hwnd) else { return };
+
+    let previously_expanded_group_identities: std::collections::HashSet<(&'static str, String)> = state
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| state.expanded.get(*i).copied().unwrap_or(false))
+        .filter_map(|(_, e)| e.acknowledgeable_group_identity())
+        .map(|(cat, key)| (cat, key.to_string()))
+        .collect();
+
+    let fresh = state.history.grouped_snapshot();
+    if entries_fingerprint(&fresh) == entries_fingerprint(&state.entries) {
+        return;
+    }
+
+    let fresh_expanded: Vec<bool> = fresh
+        .iter()
+        .map(|e| {
+            e.acknowledgeable_group_identity()
+                .map(|(cat, key)| previously_expanded_group_identities.contains(&(cat, key.to_string())))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    state.entries = fresh;
+    state.expanded = fresh_expanded;
+    let _ = InvalidateRect(hwnd, None, true);
+}
+
 /// Clamps scroll_offset_y to [0, max(0, total_height - viewport_height)] --
 /// the sole place this clamp is applied, called after every event that can
 /// change either operand (mut-card-scroll-bounds).
@@ -659,10 +764,24 @@ unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         WM_DESTROY => {
+            // Clear the shared HWND slot BEFORE freeing state: once cleared,
+            // notify_new_alert() can no longer target this window at all
+            // (its only way to reach it is that slot), so there is no
+            // window where a post could still land after the state below
+            // is freed and the handle potentially recycled.
+            if let Ok(mut slot) = OPEN_FEED_HWND.lock() {
+                if *slot == Some(hwnd.0 as isize) {
+                    *slot = None;
+                }
+            }
             if let Some(state) = feed_state(hwnd) {
                 let _ = Box::from_raw(state as *mut CardFeedState);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             }
+            LRESULT(0)
+        }
+        WM_GOOFEDUP_NEW_ALERT => {
+            refresh_feed_from_history(hwnd);
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -995,6 +1114,9 @@ fn create_alert_window_and_pump(
             SetWindowLongPtrW(feed_hwnd, GWLP_USERDATA, Box::into_raw(boxed_feed) as isize);
             let _ = ShowWindow(feed_hwnd, SW_SHOW);
             let _ = InvalidateRect(feed_hwnd, None, true);
+        }
+        if let Ok(mut slot) = OPEN_FEED_HWND.lock() {
+            *slot = Some(feed_hwnd.0 as isize);
         }
 
         attach_state(hwnd, WindowState {

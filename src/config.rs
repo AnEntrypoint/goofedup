@@ -215,7 +215,27 @@ impl Config {
             // c2-shaped-process alerts (168 hits in one session, all firing
             // during active /gm dispatch windows) -- a real, identifiable
             // source of this exact false-positive shape, not a guess.
-            known_automation_parent_names: vec!["agentplug-runner.exe".to_string(), "agentplug-runner".to_string()],
+            //
+            // bash.exe/cmd.exe/claude.exe are live-witnessed via a real
+            // sysinfo::Process::parent() chain walk of a process launched
+            // through this session's own AI-assistant tool-dispatch path:
+            // the interpreter's immediate parent was NOT agentplug-runner.exe
+            // at all but an intermediate shell (bash.exe, nested three deep)
+            // itself parented by claude.exe then cmd.exe -- explaining why
+            // an immediate-parent-only check against agentplug-runner.exe
+            // alone almost never matched in practice. explorer.exe also
+            // appears further up this same chain but is deliberately
+            // excluded: it is the universal desktop-shell ancestor of nearly
+            // every interactive process on the machine, so trusting it would
+            // make the whole check match almost anything a user launches by
+            // hand, defeating its purpose.
+            known_automation_parent_names: vec![
+                "agentplug-runner.exe".to_string(),
+                "agentplug-runner".to_string(),
+                "bash.exe".to_string(),
+                "cmd.exe".to_string(),
+                "claude.exe".to_string(),
+            ],
             poll_interval_secs: 3,
             log_path,
         }
