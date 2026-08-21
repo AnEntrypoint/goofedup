@@ -66,10 +66,17 @@ console window and a system-tray icon instead:
   toast; **click the toast itself** to open the alert history directly,
   instead of just dismissing it.
 - **Right-click menu:**
-  - *Open Recent Alerts* — opens a native alert history window (a list with
-    severity-colored rows — red for Critical, amber for Warn — plus a details
-    pane showing the evidence for the selected entry) and clears the
-    red-icon flag.
+  - *Open Recent Alerts* — opens a native alert history window: a scrollable
+    feed of severity-colored cards (red for Critical, amber for Warn), each
+    with a headline, timestamp, and click-to-expand evidence, and clears the
+    red-icon flag. Repeated alerts sharing the same activity — the same
+    process for file-read-burst, or the same obfuscation shape for
+    c2-shaped-process — bundle into one card with a count badge instead of
+    flooding the feed with duplicates. A group card has a **Mark safe**
+    button: clicking it downgrades that exact group's visual prominence
+    (never deletes it) without affecting any other process, category, or
+    group — a different detection stays fully visible even if it happens to
+    share a process name.
   - *Show Config* — opens the resolved watch list/thresholds as a sectioned
     list with bold group headers and a plain-language description of what
     each section means, grouped by category.
