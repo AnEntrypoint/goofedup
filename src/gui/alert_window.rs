@@ -4,18 +4,18 @@ use std::sync::Once;
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, FillRect, GetDC, GetDeviceCaps,
-    ReleaseDC, SetBkMode, SetTextColor, ANTIALIASED_QUALITY, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DT_LEFT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, FW_NORMAL, LOGPIXELSY,
-    OUT_DEFAULT_PRECIS, TRANSPARENT, CLIP_DEFAULT_PRECIS,
+    CreateFontW, CreateSolidBrush, DeleteObject, DrawTextW, Ellipse, FillRect, GetDC,
+    GetDeviceCaps, ReleaseDC, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
+    DEFAULT_CHARSET, DEFAULT_PITCH, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD,
+    FW_NORMAL, LOGPIXELSY, OUT_DEFAULT_PRECIS, TRANSPARENT, CLIP_DEFAULT_PRECIS,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, DRAWITEMSTRUCT, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, LVCFMT_LEFT,
-    LVCOLUMNW, LVITEMW, LVCF_FMT, LVCF_SUBITEM, LVCF_TEXT, LVCF_WIDTH, LVIF_TEXT,
-    LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETITEMW, LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES,
-    LVS_OWNERDRAWFIXED, LVS_REPORT, LVS_SINGLESEL, NMHDR, NMLISTVIEW, ODT_LISTVIEW, WC_LISTVIEWW,
-    WC_STATICW, LVN_ITEMCHANGED,
+    ImageList_Create, InitCommonControlsEx, DRAWITEMSTRUCT, ICC_LISTVIEW_CLASSES, ILC_COLOR32,
+    INITCOMMONCONTROLSEX, LVCFMT_LEFT, LVCOLUMNW, LVITEMW, LVCF_FMT, LVCF_SUBITEM, LVCF_TEXT,
+    LVCF_WIDTH, LVIF_TEXT, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETIMAGELIST, LVM_SETITEMW,
+    LVS_EX_FULLROWSELECT, LVS_EX_GRIDLINES, LVS_OWNERDRAWFIXED, LVS_REPORT, LVS_SINGLESEL,
+    LVSIL_SMALL, NMHDR, NMLISTVIEW, ODT_LISTVIEW, WC_LISTVIEWW, WC_STATICW, LVN_ITEMCHANGED,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -49,6 +49,17 @@ const WARN_FG: (u8, u8, u8) = (146, 64, 14);
 const HEADER_BG: (u8, u8, u8) = (238, 242, 247);
 const HEADER_FG: (u8, u8, u8) = (30, 41, 59);
 const DESCRIPTION_FG: (u8, u8, u8) = (100, 116, 139);
+
+// Solid (non-pastel) fill for the severity badge dot -- distinct from the
+// pastel CRITICAL_BG/WARN_BG row tint so the badge reads as a deliberate
+// indicator against the row, not just more of the same wash of color.
+const CRITICAL_BADGE: (u8, u8, u8) = (220, 38, 38);
+const WARN_BADGE: (u8, u8, u8) = (217, 119, 6);
+const INFO_BADGE: (u8, u8, u8) = (100, 116, 139);
+const BADGE_DIAMETER: i32 = 10;
+const CELL_LEFT_PADDING: i32 = 10;
+const CELL_RIGHT_PADDING: i32 = 10;
+const ROW_HEIGHT_PX: i32 = 26;
 
 static REGISTER_CLASS: Once = Once::new();
 
@@ -172,7 +183,9 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 
                 let list_hwnd = (*dis).hwndItem;
                 let column_count = state.owner_draw_column_widths.len();
-                let mut col_x = (*dis).rcItem.left + 6;
+                let mut col_x = (*dis).rcItem.left + CELL_LEFT_PADDING;
+                let is_severity_column_badge_eligible =
+                    matches!(kind, RowKind::Alert(_)) && column_count > 0;
                 for col in 0..column_count {
                     let mut buf = [0u16; 512];
                     let mut item = LVITEMW {
@@ -194,14 +207,50 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let text = text.as_str();
                     let is_last = col + 1 == column_count;
                     let col_width = if is_last {
-                        ((*dis).rcItem.right - col_x - 6).max(0)
+                        ((*dis).rcItem.right - col_x - CELL_RIGHT_PADDING).max(0)
                     } else {
                         state.owner_draw_column_widths[col]
                     };
+
+                    // Severity badge: a small solid-color dot drawn before the
+                    // text in column 0, so severity reads as a shape/color at
+                    // a glance instead of requiring the eye to parse the word
+                    // CRITICAL/WARN/INFO. Row background tint alone (the prior
+                    // behavior) is far more subtle than a dedicated indicator.
+                    let mut text_left = col_x;
+                    if col == 0 && is_severity_column_badge_eligible {
+                        if let RowKind::Alert(level) = kind {
+                            let badge_color = match level {
+                                crate::alert::Level::Critical => CRITICAL_BADGE,
+                                crate::alert::Level::Warn => WARN_BADGE,
+                                crate::alert::Level::Info => INFO_BADGE,
+                            };
+                            let cy = ((*dis).rcItem.top + (*dis).rcItem.bottom) / 2;
+                            let badge_rect = RECT {
+                                left: col_x,
+                                top: cy - BADGE_DIAMETER / 2,
+                                right: col_x + BADGE_DIAMETER,
+                                bottom: cy + BADGE_DIAMETER / 2,
+                            };
+                            let badge_brush = CreateSolidBrush(rgb(badge_color));
+                            let old_brush = SelectObject((*dis).hDC, badge_brush);
+                            let _ = Ellipse(
+                                (*dis).hDC,
+                                badge_rect.left,
+                                badge_rect.top,
+                                badge_rect.right,
+                                badge_rect.bottom,
+                            );
+                            SelectObject((*dis).hDC, old_brush);
+                            let _ = DeleteObject(badge_brush);
+                            text_left = col_x + BADGE_DIAMETER + 6;
+                        }
+                    }
+
                     let would_crash_drawtextw_with_zero_length_buffer = text.is_empty();
                     if !would_crash_drawtextw_with_zero_length_buffer {
                         let mut cell_rect = RECT {
-                            left: col_x,
+                            left: text_left,
                             top: (*dis).rcItem.top,
                             right: col_x + col_width,
                             bottom: (*dis).rcItem.bottom,
@@ -350,6 +399,32 @@ fn open_window(title: &str, hinstance: windows::Win32::Foundation::HMODULE) -> R
     Ok((hwnd, hicon))
 }
 
+/// SysListView32 in LVS_REPORT has no direct "set row height" message --
+/// the documented trick (used by every real-world app that needs taller
+/// report-mode rows) is assigning a small-icon imagelist whose item size IS
+/// the desired row height; report mode measures rows against that
+/// imagelist's cy even when no per-row icon is ever actually drawn (this
+/// window's rows are owner-drawn, so the icon slot itself stays visually
+/// empty). Zero initial images (cinitial=0) keeps this a pure sizing hack
+/// with no icon content. The imagelist is intentionally leaked to the OS
+/// image-list cache for the process lifetime rather than tracked/destroyed
+/// -- it holds no GDI bitmap resources of consequence (0 images, comctl32
+/// manages it internally) and this window is opened at most a handful of
+/// times per process run, not in a hot loop.
+fn set_report_row_height(list_hwnd: HWND, desired_row_height_px: i32) {
+    unsafe {
+        let himl = ImageList_Create(1, desired_row_height_px, ILC_COLOR32, 0, 1);
+        if !himl.is_invalid() {
+            SendMessageW(
+                list_hwnd,
+                LVM_SETIMAGELIST,
+                WPARAM(LVSIL_SMALL as usize),
+                LPARAM(himl.0),
+            );
+        }
+    }
+}
+
 fn insert_column(list_hwnd: HWND, index: i32, text: &str, width: i32) {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let mut col = LVCOLUMNW {
@@ -420,6 +495,33 @@ fn free_pre_attach_resources_since_wm_destroy_has_no_state_yet(
         }
         let _ = DestroyWindow(hwnd);
     }
+}
+
+/// Builds the details-pane text for one alert as labeled fields on their own
+/// lines instead of one run-on sentence -- a plain WC_EDITW control can't
+/// mix font weights, so real bold labels aren't possible here without a
+/// second control; a colon-labeled field-per-line layout is the readable
+/// middle ground that still reads as a structured record at a glance.
+fn format_detail_record(e: &EntrySnapshot) -> String {
+    let mut out = String::new();
+    out.push_str("Severity:  ");
+    out.push_str(&e.level.to_string());
+    out.push_str("\r\n");
+    out.push_str("Time:      ");
+    out.push_str(&e.ts);
+    out.push_str("\r\n");
+    out.push_str("Category:  ");
+    out.push_str(e.category);
+    out.push_str("\r\n\r\n");
+    out.push_str("Message:\r\n");
+    out.push_str(&e.message);
+    out.push_str("\r\n\r\n");
+    out.push_str("Evidence:\r\n");
+    match &e.evidence {
+        Some(ev) => out.push_str(ev),
+        None => out.push_str("No further evidence recorded."),
+    }
+    out
 }
 
 fn create_empty_state_label(hwnd: HWND, hinstance: windows::Win32::Foundation::HMODULE, message: &str) {
@@ -531,6 +633,7 @@ fn create_alert_window_and_pump(
                 LPARAM((LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES) as isize),
             );
             SendMessageW(list_hwnd, WM_SETFONT, WPARAM(base_font.0 as usize), LPARAM(1));
+            set_report_row_height(list_hwnd, ROW_HEIGHT_PX);
         }
 
         insert_column(list_hwnd, 0, "Severity", 90);
@@ -547,11 +650,7 @@ fn create_alert_window_and_pump(
                 &[&e.level.to_string(), &e.ts, e.category, &e.message],
             );
             row_kinds.push(RowKind::Alert(e.level));
-            let detail = match &e.evidence {
-                Some(ev) => format!("Evidence: {ev}"),
-                None => "No further evidence recorded.".to_string(),
-            };
-            details.push(detail);
+            details.push(format_detail_record(e));
         }
 
         let details_hwnd = unsafe {
@@ -678,6 +777,7 @@ fn create_config_window_and_pump(
             LPARAM((LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES) as isize),
         );
         SendMessageW(list_hwnd, WM_SETFONT, WPARAM(base_font.0 as usize), LPARAM(1));
+        set_report_row_height(list_hwnd, ROW_HEIGHT_PX);
     }
 
     insert_column(list_hwnd, 0, "Setting", 300);

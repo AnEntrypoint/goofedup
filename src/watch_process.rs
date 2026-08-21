@@ -126,7 +126,7 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
         let current: HashSet<Pid> = sys.processes().keys().copied().collect();
         for pid in current.difference(&known) {
             if let Some(p) = sys.process(*pid) {
-                inspect_new_process(&cfg, &alerts, p, &mut warned_unlisted_paths);
+                inspect_new_process(&cfg, &alerts, &sys, p, &mut warned_unlisted_paths);
             }
         }
 
@@ -336,6 +336,7 @@ fn format_bytes(b: u64) -> String {
 fn inspect_new_process(
     cfg: &Config,
     alerts: &AlertSink,
+    sys: &System,
     p: &sysinfo::Process,
     warned_unlisted_paths: &mut HashSet<String>,
 ) {
@@ -414,11 +415,33 @@ fn inspect_new_process(
     if is_watched_interp {
         if let Some(v) = score_command_line(&cmdline) {
             let head: String = cmdline.chars().take(200).collect();
-            alerts.critical(
-                "c2-shaped-process",
-                format!("'{name}' (PID {pid}) spawned with a command line shaped like an obfuscated C2 payload"),
-                format!("score={} reasons=[{}] cmdline_head={head}", v.score, v.reasons.join("; ")),
-            );
+            let evidence = format!("score={} reasons=[{}] cmdline_head={head}", v.score, v.reasons.join("; "));
+            // score_command_line itself is untouched by this check -- the
+            // content-based heuristic stays exactly as sensitive as before.
+            // Only the ALERT SEVERITY changes, and only when the immediate
+            // parent process matches a small explicit trusted-dispatcher
+            // list: a known name is not the same as a trusted actor, so a
+            // genuinely malicious payload spawned under a spoofed/matching
+            // parent name still gets reported, just at WARN instead of
+            // silently passing through unflagged.
+            let parent_is_known_automation = parent_name(sys, p)
+                .map(|parent_name| {
+                    let parent_lower = parent_name.to_lowercase();
+                    cfg.known_automation_parent_names.iter().any(|n| n.to_lowercase() == parent_lower)
+                })
+                .unwrap_or(false);
+            let message = format!("'{name}' (PID {pid}) spawned with a command line shaped like an obfuscated C2 payload");
+            if parent_is_known_automation {
+                alerts.warn("c2-shaped-process", message, evidence);
+            } else {
+                alerts.critical("c2-shaped-process", message, evidence);
+            }
         }
     }
+}
+
+fn parent_name(sys: &System, p: &sysinfo::Process) -> Option<String> {
+    let parent_pid = p.parent()?;
+    let parent = sys.process(parent_pid)?;
+    Some(parent.name().to_string_lossy().to_string())
 }

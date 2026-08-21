@@ -63,6 +63,18 @@ pub struct Config {
     pub known_high_throughput_tool_names: Vec<String>,
     pub known_high_throughput_tool_multiplier: f64,
 
+    /// Parent-process names (case-insensitive) known to legitimately spawn
+    /// interpreters with obfuscated-looking command lines as their normal
+    /// operating shape -- AI-assistant/automation harnesses that pass
+    /// scripts via -EncodedCommand to sidestep shell-escaping, per the
+    /// README's own "Known false-positive classes" section (the exact shape
+    /// a real attacker's living-off-the-land technique uses too, so this
+    /// does NOT change what score_command_line flags -- only the severity
+    /// once flagged). A match downgrades c2-shaped-process from CRITICAL to
+    /// WARN; it does not suppress the alert, since a trusted parent name is
+    /// not the same as a trusted actor running under it.
+    pub known_automation_parent_names: Vec<String>,
+
     /// How often to re-poll process list / connection table / firewall
     /// state (seconds). Real event sources are used where the platform
     /// offers them (notify for fs, WMI/ETW on Windows); this interval only
@@ -196,6 +208,14 @@ impl Config {
                 "robocopy.exe".to_string(),
             ],
             known_high_throughput_tool_multiplier: 6.0,
+            // agentplug-runner.exe is gm's own dispatch daemon: its exec_js
+            // verb spawns powershell.exe -EncodedCommand directly for every
+            // PowerShell script dispatch, live-confirmed via
+            // agentplug-host's exec_js.rs and this project's own recorded
+            // c2-shaped-process alerts (168 hits in one session, all firing
+            // during active /gm dispatch windows) -- a real, identifiable
+            // source of this exact false-positive shape, not a guess.
+            known_automation_parent_names: vec!["agentplug-runner.exe".to_string(), "agentplug-runner".to_string()],
             poll_interval_secs: 3,
             log_path,
         }
