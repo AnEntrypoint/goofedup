@@ -248,6 +248,20 @@ impl Config {
                 "msedgewebview2.exe".to_string(),
                 "msedge.exe".to_string(),
                 "discord.exe".to_string(),
+                // gm's own dispatch daemon. Live bug found via a one-shot
+                // sysinfo-name-vs-allowlist witness: this name was described
+                // in this field's own doc comment above as already listed,
+                // but was never actually added to this Vec -- so the
+                // relaxation never applied and every dispatch burst fell
+                // through to the unrelaxed 50MB floor, which its normal
+                // 70-99MB reads clear easily. The relative-spike relaxation
+                // alone can't fix this either: agentplug-runner.exe respawns
+                // under a fresh PID often (self-update swaps, daemon
+                // restarts), so its ReadTracker rarely has an established
+                // baseline to be relative to -- only the absolute floor
+                // matters for its real shape (idle, then a burst).
+                "agentplug-runner.exe".to_string(),
+                "agentplug-runner".to_string(),
             ],
             known_high_throughput_tool_multiplier: 6.0,
             // agentplug-runner.exe is gm's own dispatch daemon: its exec_js

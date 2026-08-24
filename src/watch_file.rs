@@ -34,6 +34,27 @@ const BASELINE_SMALL_CEILING: u64 = 5 * 1024;
 const GROWTH_ABSOLUTE_FLOOR: u64 = 20 * 1024;
 const GROWTH_RATIO_THRESHOLD: f64 = 10.0;
 
+/// Path segments that mark a package-manager cache/staging directory --
+/// files here are written incrementally during a normal install/extract
+/// (small stub, then filled with real content), so "small baseline that
+/// later balloons" is the expected shape of every ordinary `npm install`/
+/// `npx`, not tampering. Live-witnessed: 229 of 239 unusual-growth CRITICALs
+/// in one session were npm's own `_cacache`/`_npx` staging dirs, 0 of them
+/// real. Never a payload's *final resting place* for this attack class
+/// either -- a real bootstrap-hijack targets a package's already-installed,
+/// long-lived entry point, not a directory that gets wiped and rewritten on
+/// every install.
+const CACHE_STAGING_DIR_SEGMENTS: &[&str] = &["_cacache", "_npx", "node_modules/.cache", ".cache"];
+
+fn is_cache_staging_path(path: &std::path::Path) -> bool {
+    let path_lower = path.to_string_lossy().to_lowercase();
+    CACHE_STAGING_DIR_SEGMENTS.iter().any(|seg| {
+        let seg_lower = seg.to_lowercase();
+        path_lower.contains(&format!("\\{seg_lower}\\"))
+            || path_lower.contains(&format!("/{seg_lower}/"))
+    })
+}
+
 pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>) {
     // First-seen size per path, for the generic "known-small file just got
     // huge" detector below -- this is the general form of what the explicit
@@ -120,7 +141,7 @@ fn check_unusual_growth(
     baselines: &Mutex<HashMap<PathBuf, u64>>,
     path: &std::path::Path,
 ) {
-    if !is_watched_script_ext(path) {
+    if !is_watched_script_ext(path) || is_cache_staging_path(path) {
         return;
     }
     let Ok(meta) = std::fs::metadata(path) else {
