@@ -224,6 +224,16 @@ fn check_read_burst(
     } else {
         cfg.file_read_burst_absolute_bytes_per_poll
     };
+    // Same relaxation applied to the relative-spike path: a browser or sync
+    // engine legitimately swings hard against its own quiet-tab baseline
+    // (live-witnessed: chrome/firefox/Discord all recorded 8-15x spikes
+    // during ordinary page loads), so a known high-throughput name must
+    // clear a proportionally higher multiple of its own average too.
+    let effective_relative_multiplier = if is_known_high_throughput_tool {
+        cfg.file_read_burst_relative_multiplier * cfg.known_high_throughput_tool_multiplier
+    } else {
+        cfg.file_read_burst_relative_multiplier
+    };
 
     // Live-witnessed: a process whose own baseline is already substantial
     // (python.exe reading 60MB against a 13-24MB/poll established average)
@@ -249,7 +259,7 @@ fn check_read_burst(
     // relative check even engages, not just "greater than noise."
     const BASELINE_WARM_UP_FLOOR: f64 = 512.0 * 1024.0;
     let single_poll_relative_spike = tracker.avg_delta > BASELINE_WARM_UP_FLOOR
-        && (delta as f64) >= tracker.avg_delta * cfg.file_read_burst_relative_multiplier;
+        && (delta as f64) >= tracker.avg_delta * effective_relative_multiplier;
 
     tracker.record_poll(single_poll_relative_spike, single_poll_absolute_burst);
 
@@ -418,12 +428,17 @@ fn inspect_new_process(
             // Severity stays CRITICAL unconditionally -- a c2-shaped command
             // line is a severe signal regardless of who spawned it, since a
             // real compromise could just as easily run under a parent name
-            // that happens to match a trusted dispatcher. Ancestry is still
-            // useful triage context, so it's appended to the evidence text
-            // instead of ever changing severity: a known name is not the
-            // same as a trusted actor, and the alert must never be quieter
-            // for a payload that merely looks like it came from a familiar
-            // process.
+            // that happens to match a trusted dispatcher. Live-confirmed:
+            // a real Discord-bootstrap-hijack C2 loader (fileless XOR-coded
+            // payload fetched from a hardcoded IP, self-tagged
+            // "app-discord-eval") fired under parent=recognized-dev-tool-
+            // ancestor on its very first hit -- a downgrade here would have
+            // muted the real incident this tool exists to catch. Ancestry is
+            // still useful triage context, so it's appended to the evidence
+            // text instead of ever changing severity: a known name is not
+            // the same as a trusted actor, and the alert must never be
+            // quieter for a payload that merely looks like it came from a
+            // familiar process.
             let parent_is_known_automation = ancestor_names(sys, p, ANCESTOR_WALK_MAX_DEPTH)
                 .iter()
                 .any(|ancestor| {

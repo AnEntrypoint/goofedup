@@ -10,7 +10,7 @@ use goofedup::alert::{AlertSink, Level};
 use goofedup::config::Config;
 use goofedup::gui::icon::IconState;
 use goofedup::gui::{alert_window, autostart, history::History, icon, single_instance, toast};
-use goofedup::{watch_file, watch_network, watch_persistence, watch_process};
+use goofedup::{scan_js, watch_file, watch_network, watch_persistence, watch_process};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -37,7 +37,7 @@ fn main() {
     {
         let history = history.clone();
         let alerting_enabled = alerting_enabled.clone();
-        alerts.set_on_alert(move |a| {
+        alerts.add_on_alert(move |a| {
             if !alerting_enabled.load(Ordering::Relaxed) {
                 return;
             }
@@ -46,6 +46,18 @@ fn main() {
             if matches!(a.level, Level::Warn | Level::Critical) {
                 toast::show(&format!("goofedup: {}", a.category), &a.message, open_history_request);
             }
+        });
+    }
+
+    // Alert-triggered response: any Warn/Critical alert naming an app sends
+    // the hidden-unicode-identifier content scan over that app's install
+    // tree. Registered before the watchers start so nothing slips past.
+    let response = Arc::new(scan_js::AlertResponse::new());
+    {
+        let response = response.clone();
+        let alerts_for_response = alerts.clone();
+        alerts.add_on_alert(move |a| {
+            response.on_alert(a, &alerts_for_response);
         });
     }
 

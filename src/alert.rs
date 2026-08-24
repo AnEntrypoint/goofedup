@@ -48,7 +48,7 @@ pub struct Alert {
 pub struct AlertSink {
     log_path: PathBuf,
     lock: Mutex<()>,
-    on_alert: Mutex<Option<Arc<dyn Fn(&Alert) + Send + Sync>>>,
+    on_alert: Mutex<Vec<Arc<dyn Fn(&Alert) + Send + Sync>>>,
 }
 
 impl AlertSink {
@@ -56,24 +56,25 @@ impl AlertSink {
         Self {
             log_path,
             lock: Mutex::new(()),
-            on_alert: Mutex::new(None),
+            on_alert: Mutex::new(Vec::new()),
         }
     }
 
     /// Registers a callback invoked with every emitted Alert, in addition to
-    /// the existing console+file output -- the GUI's toast/history hook.
-    pub fn set_on_alert(&self, cb: impl Fn(&Alert) + Send + Sync + 'static) {
-        *lock_recovering(&self.on_alert) = Some(Arc::new(cb));
+    /// the existing console+file output -- the GUI's toast/history hook and
+    /// the scan_js alert-response hook. More than one consumer may register.
+    pub fn add_on_alert(&self, cb: impl Fn(&Alert) + Send + Sync + 'static) {
+        lock_recovering(&self.on_alert).push(Arc::new(cb));
     }
 
     pub fn emit(&self, a: Alert) {
-        // Clone the Arc and drop the on_alert lock before invoking the
-        // callback -- calling out to arbitrary code (which may itself call
+        // Clone the Arcs and drop the on_alert lock before invoking the
+        // callbacks -- calling out to arbitrary code (which may itself call
         // back into emit, the real shape once the GUI's own alerting paths
         // grow) while still holding this lock is a same-thread self-deadlock
         // on a non-reentrant Mutex, witnessed live via a nested-emit probe.
-        let cb = lock_recovering(&self.on_alert).clone();
-        if let Some(cb) = cb {
+        let cbs = lock_recovering(&self.on_alert).clone();
+        for cb in &cbs {
             cb(&a);
         }
         let _guard = lock_recovering(&self.lock);

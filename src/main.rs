@@ -58,6 +58,18 @@ fn main() {
     }
     let alerts = Arc::new(AlertSink::new(cfg.log_path.clone()));
 
+    // Alert-triggered response: any Warn/Critical alert naming an app sends
+    // the hidden-unicode-identifier content scan over that app's install
+    // tree. Registered before the watchers start so nothing slips past.
+    let response = Arc::new(scan_js::AlertResponse::new());
+    {
+        let response = response.clone();
+        let alerts_for_response = alerts.clone();
+        alerts.add_on_alert(move |a| {
+            response.on_alert(a, &alerts_for_response);
+        });
+    }
+
     alerts.info(
         "goofedup",
         format!(

@@ -21,6 +21,7 @@ All watchers run concurrently, are **alert-only** (nothing is ever killed, delet
 - **Mass file-read bursts** — a process reading an unusual amount of file data in one poll interval, either an absolute burst or a spike versus its own recent average. The tell-tale shape of drive scanning/harvesting.
 - **Network scanning** — a process opening connections to an unusual number of distinct ports or hosts in a short window.
 - **Firewall silently going dark** — a common malware self-defense move.
+- **Alert-triggered content audit** — when any Warn/Critical alert names an app, its install tree is automatically scanned (including inside Electron `.asar` archives) for `\uXXXX`-hidden ASCII identifiers; alerts naming a high-value target (Discord, Adobe, Slack, Teams) widen the scan to that product's whole tree.
 
 ## Known false-positive classes (read this before you panic)
 

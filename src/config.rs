@@ -54,12 +54,14 @@ pub struct Config {
 
     /// Process names (case-insensitive, matched against sysinfo's reported
     /// process name) that are KNOWN to legitimately sustain high burst reads
-    /// as their normal operating shape -- sync/backup/indexer tools, per the
-    /// README's own "Known false-positive classes" section. A name match
-    /// raises this process's effective absolute-burst threshold by
-    /// `known_high_throughput_tool_multiplier`, it does NOT exempt the
-    /// process from detection entirely: a name is not the same as the actor
-    /// running under it, so a genuinely extreme read still alerts.
+    /// as their normal operating shape -- sync/backup/indexer tools and
+    /// browsers/Electron apps, per the README's own "Known false-positive
+    /// classes" section. A name match raises this process's effective
+    /// threshold on BOTH burst paths by `known_high_throughput_tool_
+    /// multiplier` -- the absolute floor AND the relative-spike multiplier
+    /// against its own baseline -- it does NOT exempt the process from
+    /// detection entirely: a name is not the same as the actor running
+    /// under it, so a genuinely extreme read still alerts.
     pub known_high_throughput_tool_names: Vec<String>,
     pub known_high_throughput_tool_multiplier: f64,
 
@@ -72,8 +74,10 @@ pub struct Config {
     /// does NOT change severity or suppress the alert -- c2-shaped-process
     /// always fires CRITICAL regardless of parent, since a genuinely
     /// malicious payload could run under a parent name that happens to
-    /// match this list too. A match is noted in the evidence text as triage
-    /// context only.
+    /// match this list too (live-confirmed: a real Discord-bootstrap-hijack
+    /// C2 loader fired under parent=recognized-dev-tool-ancestor on its
+    /// first hit). A match is noted in the evidence text as triage context
+    /// only.
     pub known_automation_parent_names: Vec<String>,
 
     /// How often to re-poll process list / connection table / firewall
@@ -122,6 +126,24 @@ impl Config {
                 backup_sibling_roots.push(appdata.join("npm"));
                 backup_sibling_roots.push(appdata.join("npm-cache"));
                 allowed_exec_roots.push(appdata);
+            }
+            // Portable dev-tool install homes -- the same roots macOS/Linux
+            // already allow below. Live-witnessed allowlist gaps: rustc/
+            // cargo/clippy run from ~/.rustup/~/.cargo toolchain dirs, pip
+            // and scoop-managed tools from ~/scoop, user-local CLI tooling
+            // from ~/.local/bin and per-tool homes like ~/.kimi-code and
+            // ~/.gm-tools. Each is a user-writable location, so the check
+            // stays WARN-tier exactly as before -- this only closes known
+            // noise gaps, it does not trust anything.
+            for dev_home in [
+                ".cargo",
+                ".rustup",
+                "scoop",
+                ".local",
+                ".gm-tools",
+                ".kimi-code",
+            ] {
+                allowed_exec_roots.push(home.join(dev_home));
             }
             if let Ok(pf) = std::env::var("ProgramFiles") {
                 allowed_exec_roots.push(PathBuf::from(pf));
@@ -188,7 +210,13 @@ impl Config {
             deny_exec_path_fragments,
             allowed_exec_roots,
             scan_distinct_ports_threshold: 20,
-            scan_distinct_hosts_threshold: 15,
+            // Live-witnessed false-positive calibration: a desktop browser
+            // loading a normal page fans out to 15-27 distinct CDN hosts in
+            // a 10s window (recorded chrome.exe peaks), so the old value of
+            // 15 fired on ordinary browsing. 40+ distinct hosts in 10s is
+            // still far outside any legitimate interactive app's shape
+            // while remaining well below a real scanner's rate.
+            scan_distinct_hosts_threshold: 40,
             scan_window_secs: 10,
             // 50MB read in a single ~3s poll interval is well past what any
             // normal interactive tool does in that window; a real bulk
@@ -207,6 +235,19 @@ impl Config {
                 "backblaze.exe".to_string(),
                 "rsync".to_string(),
                 "robocopy.exe".to_string(),
+                // Browsers and Electron apps: live-witnessed false-positive
+                // sources for the RELATIVE-spike path (chrome/firefox/Discord
+                // all recorded sustained multi-poll spikes against their own
+                // quiet-tab baselines during ordinary page loads and media
+                // playback). Listed here, not exempted -- an extreme read
+                // still alerts, just against a proportionally higher bar.
+                "chrome.exe".to_string(),
+                "chrome".to_string(),
+                "firefox.exe".to_string(),
+                "firefox".to_string(),
+                "msedgewebview2.exe".to_string(),
+                "msedge.exe".to_string(),
+                "discord.exe".to_string(),
             ],
             known_high_throughput_tool_multiplier: 6.0,
             // agentplug-runner.exe is gm's own dispatch daemon: its exec_js
