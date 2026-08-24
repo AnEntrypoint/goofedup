@@ -66,6 +66,7 @@ fn main() {
     };
 
     toast::init();
+    goofedup::gui::shortcut::ensure_registered();
 
     let cfg = Arc::new(Config::default_for_platform());
     if let Some(parent) = cfg.log_path.parent() {
