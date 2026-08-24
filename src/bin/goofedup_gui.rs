@@ -6,16 +6,59 @@
 // Critical event, so "we done goofed" reaches the user without a terminal
 // window open.
 
-use goofedup::alert::{AlertSink, Level};
+use goofedup::alert::{Alert, AlertSink, Level};
 use goofedup::config::Config;
 use goofedup::gui::icon::IconState;
 use goofedup::gui::{alert_window, autostart, history::History, icon, single_instance, toast};
 use goofedup::{scan_js, watch_file, watch_network, watch_persistence, watch_process};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
+
+/// How long after popping a toast for a given (category, subject) before
+/// another alert sharing that same identity pops a fresh one. Every alert
+/// still reaches the log and the history window regardless of this cooldown
+/// -- only the interruptive toast pop is throttled, so a real burst (a
+/// scanning loop, a retrying attacker) doesn't turn into dozens of
+/// back-to-back popups for what the user already saw once. Matches the
+/// history window's own alert-grouping identity (same process for
+/// file-read-burst/process-path, same obfuscation shape for
+/// c2-shaped-process) so "one group, one toast" stays consistent between
+/// the popup and the history list the user opens from it.
+const TOAST_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+/// Pulls the same "subject" identity out of an alert that the history
+/// window groups alerts by -- the quoted process name for the categories
+/// that name one, or the alert's own message otherwise. Kept independent
+/// of history::extract_group_key (which operates on a stored EntrySnapshot,
+/// not a live &Alert) rather than adding a cross-module type dependency for
+/// one shared substring extraction.
+fn toast_throttle_key(a: &Alert) -> String {
+    let subject = a
+        .message
+        .strip_prefix('\'')
+        .and_then(|rest| rest.find('\'').map(|end| rest[..end].to_string()))
+        .unwrap_or_else(|| a.message.clone());
+    format!("{}\u{1}{subject}", a.category)
+}
+
+fn should_pop_toast(last_toasted: &Mutex<HashMap<String, Instant>>, a: &Alert) -> bool {
+    let key = toast_throttle_key(a);
+    let mut map = last_toasted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let now = Instant::now();
+    let should_pop = match map.get(&key) {
+        Some(last) => now.duration_since(*last) >= TOAST_COOLDOWN,
+        None => true,
+    };
+    if should_pop {
+        map.insert(key, now);
+    }
+    should_pop
+}
 
 fn main() {
     let Some(_instance_guard) = single_instance::acquire() else {
@@ -34,16 +77,18 @@ fn main() {
     let history = Arc::new(History::new());
     let alerting_enabled = Arc::new(AtomicBool::new(true));
 
+    let last_toasted: Arc<Mutex<HashMap<String, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
     {
         let history = history.clone();
         let alerting_enabled = alerting_enabled.clone();
+        let last_toasted = last_toasted.clone();
         alerts.add_on_alert(move |a| {
             if !alerting_enabled.load(Ordering::Relaxed) {
                 return;
             }
             history.push(a);
             alert_window::notify_new_alert();
-            if matches!(a.level, Level::Warn | Level::Critical) {
+            if matches!(a.level, Level::Warn | Level::Critical) && should_pop_toast(&last_toasted, a) {
                 toast::show(&format!("goofedup: {}", a.category), &a.message, open_history_request);
             }
         });
