@@ -84,8 +84,28 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
             // few hosts) still triggers on the port threshold alone; a real
             // host sweep only counts once it also shows some port variety,
             // not just "many HTTPS connections."
+            // A known high-throughput/high-fanout tool (same list the
+            // read-burst detector uses -- browsers, sync engines) gets its
+            // host-sweep floor raised the same way its read-burst floor
+            // is: live-witnessed even after the general 15->40 fix,
+            // chrome.exe alone kept clearing 40 with a heavy page/session
+            // (46-69 distinct hosts, always just 2-3 ports, 4 hits in
+            // ~11 hours, zero non-browser hits in the same window) -- a
+            // real subnet sweep still clears this raised bar easily, since
+            // it needs far more than a browser's own CDN/ad/analytics
+            // fanout to look like scanning.
+            let is_known_high_throughput_tool = cfg
+                .known_high_throughput_tool_names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(&c.process_name));
+            let effective_hosts_threshold = if is_known_high_throughput_tool {
+                (cfg.scan_distinct_hosts_threshold as f64 * cfg.known_high_throughput_tool_multiplier) as usize
+            } else {
+                cfg.scan_distinct_hosts_threshold
+            };
+
             let port_scan_shape = w.ports.len() >= cfg.scan_distinct_ports_threshold;
-            let host_sweep_shape = w.hosts.len() >= cfg.scan_distinct_hosts_threshold
+            let host_sweep_shape = w.hosts.len() >= effective_hosts_threshold
                 && w.ports.len() >= HOST_SWEEP_MIN_PORT_VARIETY;
 
             if !w.alerted && (port_scan_shape || host_sweep_shape) {
