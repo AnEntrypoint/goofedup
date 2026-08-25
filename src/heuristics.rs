@@ -89,6 +89,24 @@ pub fn decode_encoded_command(cmdline: &str) -> Option<String> {
 
 /// Single-layer decode: finds the first `-EncodedCommand`/`-enc <base64>`
 /// or `$EncodedCommand = '<base64>'` shape in `text` and decodes it.
+///
+/// Tries UTF-16LE first (PowerShell's own documented -EncodedCommand
+/// format), then falls back to plain UTF-8. This matters beyond the outer
+/// CLI-flag layer: live-witnessed, a real automation harness's INNER
+/// `$EncodedCommand = '...'` assignment is its own custom convention
+/// wrapping a plain UTF-8-encoded PowerShell one-liner (decoded real
+/// samples: `Stop-Process -Id ...`, `Get-CimInstance Win32_Process
+/// -Filter ...`), not another UTF-16LE PowerShell-native layer -- a
+/// decoder that only tries UTF-16LE silently fails on this inner layer
+/// (odd byte count, or `String::from_utf16` erroring on bytes that are
+/// valid UTF-8 but not valid UTF-16 code units) and the caller falls back
+/// to the outer-decoded text, which still contains the short inner blob
+/// still tripping has_long_encoded_blob -- the same false-positive shape
+/// recurring because of an encoding-format assumption, not because the
+/// content was ever actually re-examined. Trying UTF-8 as a fallback
+/// generalizes the decoder to any base64-wrapped-text convention, not
+/// just PowerShell's specific -EncodedCommand format, which is the right
+/// scope: a real payload could be base64-wrapped in either encoding.
 fn decode_one_encoded_command(text: &str) -> Option<String> {
     let flag_pos = text
         .find("-EncodedCommand")
@@ -105,11 +123,26 @@ fn decode_one_encoded_command(text: &str) -> Option<String> {
         return None;
     }
     let bytes = base64_decode(&b64)?;
-    if bytes.len() < 2 || bytes.len() % 2 != 0 {
-        return None;
+
+    if bytes.len() >= 2 && bytes.len() % 2 == 0 {
+        let utf16: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        if let Ok(s) = String::from_utf16(&utf16) {
+            // A real UTF-16LE PowerShell command is overwhelmingly ASCII
+            // text with the occasional wide char, not dense with U+0100+
+            // code points -- decoding arbitrary UTF-8 bytes as UTF-16LE
+            // can still "succeed" (any even-length byte sequence is valid
+            // UTF-16 code units) while producing garbled non-text. Prefer
+            // this result only when it looks like real text; otherwise
+            // fall through to the UTF-8 attempt below.
+            let non_ascii_ratio =
+                s.chars().filter(|c| !c.is_ascii()).count() as f64 / s.chars().count().max(1) as f64;
+            if non_ascii_ratio < 0.2 {
+                return Some(s);
+            }
+        }
     }
-    let utf16: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-    String::from_utf16(&utf16).ok()
+
+    String::from_utf8(bytes).ok()
 }
 
 /// Minimal standard-alphabet base64 decoder (RFC 4648, with padding) --
