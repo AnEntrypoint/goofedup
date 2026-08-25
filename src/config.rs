@@ -276,6 +276,18 @@ impl Config {
                 // what it's for is not evidence of anything.
                 "grep.exe".to_string(),
                 "grep".to_string(),
+                // claude.exe (the Claude Code CLI itself, installed at the
+                // standard ~/.local/bin location): a large (~384MB)
+                // self-contained binary that reads a burst of its own
+                // bundled assets/model data into memory on startup.
+                // Live-witnessed: 1.7GB read in ~3s against a 0B baseline
+                // (session startup, no prior activity to average against)
+                // -- the AI-assistant-harness startup shape this project's
+                // own README already documents as expected noise for
+                // -EncodedCommand PowerShell, now confirmed for this
+                // process's own file-read pattern too.
+                "claude.exe".to_string(),
+                "claude".to_string(),
             ],
             known_high_throughput_tool_multiplier: 6.0,
             // agentplug-runner.exe is gm's own dispatch daemon: its exec_js
