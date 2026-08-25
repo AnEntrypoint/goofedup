@@ -120,6 +120,10 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
 
     let mut score = 0u32;
     let mut reasons = Vec::new();
+    // Tracks whether a signal harder to trigger by accident than either
+    // length or entropy alone has fired -- see the entropy-gating comment
+    // below for why length doesn't count.
+    let mut has_strong_signal = false;
 
     if cmdline.len() > 2000 {
         score += 2;
@@ -132,29 +136,18 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
     if let Some(m) = ip_re().find(cmdline) {
         score += 2;
         reasons.push(format!("embedded IP literal ({})", m.as_str()));
+        has_strong_signal = true;
     }
     if url_re().is_match(cmdline) {
         score += 1;
         reasons.push("embedded URL literal".to_string());
-    }
-
-    let entropy = shannon_entropy(cmdline);
-    // Natural-language source code (even minified) typically sits well
-    // under 5.0 bits/char at this alphabet size; packed/encrypted/heavily
-    // obfuscated content routinely runs 5.0-6.0+. This is the primary
-    // structural signal -- it fires on content this tool has never seen a
-    // single byte of before.
-    if entropy > 5.2 {
-        score += 3;
-        reasons.push(format!("high content entropy ({entropy:.2} bits/char, packed/encrypted-looking)"));
-    } else if entropy > 4.7 {
-        score += 1;
-        reasons.push(format!("elevated content entropy ({entropy:.2} bits/char)"));
+        has_strong_signal = true;
     }
 
     if let Some(len) = has_long_encoded_blob(cmdline) {
         score += 2;
         reasons.push(format!("long contiguous encoded-looking blob ({len} chars, base64/hex-alphabet run)"));
+        has_strong_signal = true;
     }
 
     let hits: Vec<&str> = OBFUSCATION_MARKERS
@@ -165,6 +158,7 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
     if !hits.is_empty() {
         score += 1;
         reasons.push(format!("generic obfuscation/exfil marker(s): {}", hits.join(", ")));
+        has_strong_signal = true;
     }
 
     let symbol_count = cmdline
@@ -178,6 +172,33 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
             "high symbol density ({:.0}%, obfuscated-code shape)",
             density * 100.0
         ));
+        has_strong_signal = true;
+    }
+
+    // Entropy is scored LAST and only counts toward the alert threshold if
+    // at least one of the signals above already fired -- length alone does
+    // NOT count as corroboration (has_strong_signal is never set by the
+    // length check), since any legitimately verbose script clears 600
+    // chars on its own. Live-witnessed false-positive class: ordinary
+    // dense-but-harmless JS (this project's own `node -e` snippets reading/
+    // parsing local .gm/exec-spool/*.json files) routinely crosses 5.2
+    // bits/char on content alone -- 4 separate CRITICALs, all score=3,
+    // entropy the ONLY reason, zero IP/URL/blob/marker/density
+    // corroboration. The real Discord C2 incident this detector caught, by
+    // contrast, always scored 10 with 5+ signals stacked (IP + URL +
+    // entropy + eval/base64 markers + symbol density) -- entropy was never
+    // the sole or deciding signal for the real attack, so requiring
+    // corroboration here doesn't touch that detection at all, only closes
+    // the entropy-alone false-positive gap. Nothing here changes severity:
+    // anything that still crosses the score>=3 bar fires CRITICAL exactly
+    // as before.
+    let entropy = shannon_entropy(cmdline);
+    if entropy > 5.2 && has_strong_signal {
+        score += 3;
+        reasons.push(format!("high content entropy ({entropy:.2} bits/char, packed/encrypted-looking)"));
+    } else if entropy > 4.7 && has_strong_signal {
+        score += 1;
+        reasons.push(format!("elevated content entropy ({entropy:.2} bits/char)"));
     }
 
     if score >= 3 {
