@@ -8,7 +8,7 @@
 
 use crate::alert::AlertSink;
 use crate::config::Config;
-use crate::heuristics::{is_denied_exec_path, is_unlisted_exec_path, score_command_line, score_process_name};
+use crate::heuristics::{decode_encoded_command, is_denied_exec_path, is_unlisted_exec_path, score_command_line, score_process_name};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -425,6 +425,16 @@ fn inspect_new_process(
     if is_watched_interp {
         if let Some(v) = score_command_line(&cmdline) {
             let head: String = cmdline.chars().take(200).collect();
+            // When the command decoded (an -EncodedCommand/-enc/nested
+            // $EncodedCommand shape that score_command_line actually
+            // scored the DECODED content of, per its own doc comment),
+            // include a prefix of what it decoded to directly in the
+            // evidence -- ground truth for the next investigation instead
+            // of guessing at the real structure from a 200-char raw-cmdline
+            // prefix, which is what the wrapper's own base64 head shows and
+            // is useless for seeing what the command actually does.
+            let decoded_head = decode_encoded_command(&cmdline)
+                .map(|d| d.chars().take(300).collect::<String>());
             // Severity stays CRITICAL unconditionally -- a c2-shaped command
             // line is a severe signal regardless of who spawned it, since a
             // real compromise could just as easily run under a parent name
@@ -450,7 +460,14 @@ fn inspect_new_process(
             } else {
                 "parent=unrecognized"
             };
-            let evidence = format!("score={} reasons=[{}] {parent_note} cmdline_head={head}", v.score, v.reasons.join("; "));
+            let decoded_note = decoded_head
+                .map(|d| format!(" decoded_head={d}"))
+                .unwrap_or_default();
+            let evidence = format!(
+                "score={} reasons=[{}] {parent_note} cmdline_head={head}{decoded_note}",
+                v.score,
+                v.reasons.join("; ")
+            );
             let message = format!("'{name}' (PID {pid}) spawned with a command line shaped like an obfuscated C2 payload");
             alerts.critical("c2-shaped-process", message, evidence);
         }

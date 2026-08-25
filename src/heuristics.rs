@@ -74,7 +74,7 @@ const OBFUSCATION_MARKERS: &[&str] = &[
 /// function's concern -- the raw cmdline's other signals still apply
 /// either way since the caller falls back to scoring the original string
 /// when this returns None).
-fn decode_encoded_command(cmdline: &str) -> Option<String> {
+pub fn decode_encoded_command(cmdline: &str) -> Option<String> {
     const MAX_DECODE_DEPTH: u32 = 4;
     let first = decode_one_encoded_command(cmdline)?;
     let mut current = first;
