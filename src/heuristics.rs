@@ -61,17 +61,42 @@ const OBFUSCATION_MARKERS: &[&str] = &[
 /// completely benign encoded command (decoded sample: `$EncodedCommand =
 /// '...'; ... cd C:\dev\...`) and a genuinely malicious one both score
 /// identically on the WRAPPER alone, before any actual content is examined.
-/// Returns None if no `-EncodedCommand`/`-enc` flag is present, or if the
-/// argument after it doesn't decode as valid base64 UTF-16LE (a malformed
-/// argument is itself unusual but not this function's concern -- the raw
-/// cmdline's other signals still apply either way since the caller falls
-/// back to scoring the original string when this returns None).
+/// Recurses (bounded to MAX_DECODE_DEPTH) into a `$EncodedCommand =
+/// '<base64>'`-shaped assignment found in the decoded text -- live-
+/// witnessed: this project's own automation harness nests a SECOND
+/// -EncodedCommand-style layer inside the first (decodes to
+/// `$EncodedCommand = 'Y2QgQzpc...'`), and without recursing, that inner
+/// base64 string itself still trivially satisfies has_long_encoded_blob on
+/// the one-layer-decoded text, reproducing the exact same false-positive
+/// shape one level down. Returns None if no `-EncodedCommand`/`-enc` flag
+/// is present, or if the argument after it doesn't decode as valid base64
+/// UTF-16LE (a malformed argument is itself unusual but not this
+/// function's concern -- the raw cmdline's other signals still apply
+/// either way since the caller falls back to scoring the original string
+/// when this returns None).
 fn decode_encoded_command(cmdline: &str) -> Option<String> {
-    let flag_pos = cmdline
+    const MAX_DECODE_DEPTH: u32 = 4;
+    let first = decode_one_encoded_command(cmdline)?;
+    let mut current = first;
+    for _ in 0..MAX_DECODE_DEPTH {
+        match decode_one_encoded_command(&current) {
+            Some(next) => current = next,
+            None => break,
+        }
+    }
+    Some(current)
+}
+
+/// Single-layer decode: finds the first `-EncodedCommand`/`-enc <base64>`
+/// or `$EncodedCommand = '<base64>'` shape in `text` and decodes it.
+fn decode_one_encoded_command(text: &str) -> Option<String> {
+    let flag_pos = text
         .find("-EncodedCommand")
         .map(|i| i + "-EncodedCommand".len())
-        .or_else(|| cmdline.find("-enc ").map(|i| i + "-enc".len()))?;
-    let rest = cmdline[flag_pos..].trim_start();
+        .or_else(|| text.find("-enc ").map(|i| i + "-enc".len()))
+        .or_else(|| text.find("$EncodedCommand = '").map(|i| i + "$EncodedCommand = '".len()))
+        .or_else(|| text.find("$EncodedCommand='").map(|i| i + "$EncodedCommand='".len()))?;
+    let rest = text[flag_pos..].trim_start();
     let b64: String = rest
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
