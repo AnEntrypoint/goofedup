@@ -289,7 +289,21 @@ impl Config {
                 "claude.exe".to_string(),
                 "claude".to_string(),
             ],
-            known_high_throughput_tool_multiplier: 6.0,
+            // 6.0 -> 16.0: syncthing.exe (already listed above, since before
+            // this session's tuning) kept firing file-read-burst on the
+            // RELATIVE-spike path even with the 6.0 relaxation -- live-
+            // witnessed real bursts of 62x-121x its own recent baseline
+            // (e.g. 65.1MB against a 549KB/poll average = ~121x), a real
+            // sync engine catching up after a quiet stretch, comfortably
+            // clearing the old 8.0*6.0=48x effective bar. 16.0 gives
+            // 8.0*16.0=128x headroom, covering the worst observed real
+            // spike with margin, while the absolute floor this multiplier
+            // also relaxes (50MB*16=800MB) and the network-scan host-sweep
+            // floor (40*16=640 hosts) both stay far below what a genuinely
+            // extreme scanner/harvester would need to clear -- this raises
+            // the bar for known-legitimate tools only, it doesn't touch
+            // what counts as extreme in the first place.
+            known_high_throughput_tool_multiplier: 16.0,
             // agentplug-runner.exe is gm's own dispatch daemon: its exec_js
             // verb spawns powershell.exe -EncodedCommand directly for every
             // PowerShell script dispatch, live-confirmed via
