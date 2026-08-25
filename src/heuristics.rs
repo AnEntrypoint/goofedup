@@ -51,6 +51,78 @@ const OBFUSCATION_MARKERS: &[&str] = &[
     "curl -s",
 ];
 
+/// Extracts and decodes a PowerShell `-EncodedCommand`/`-enc` argument's
+/// base64 payload (PowerShell's own documented format: base64 of UTF-16LE
+/// text) so its DECODED content can be scored instead of the encoding
+/// wrapper itself. Live-witnessed root cause of a real false-positive class:
+/// `-EncodedCommand` is itself in OBFUSCATION_MARKERS, and any encoded
+/// command of reasonable length trivially satisfies has_long_encoded_blob
+/// too (that's definitionally what base64-encoding produces) -- so a
+/// completely benign encoded command (decoded sample: `$EncodedCommand =
+/// '...'; ... cd C:\dev\...`) and a genuinely malicious one both score
+/// identically on the WRAPPER alone, before any actual content is examined.
+/// Returns None if no `-EncodedCommand`/`-enc` flag is present, or if the
+/// argument after it doesn't decode as valid base64 UTF-16LE (a malformed
+/// argument is itself unusual but not this function's concern -- the raw
+/// cmdline's other signals still apply either way since the caller falls
+/// back to scoring the original string when this returns None).
+fn decode_encoded_command(cmdline: &str) -> Option<String> {
+    let flag_pos = cmdline
+        .find("-EncodedCommand")
+        .map(|i| i + "-EncodedCommand".len())
+        .or_else(|| cmdline.find("-enc ").map(|i| i + "-enc".len()))?;
+    let rest = cmdline[flag_pos..].trim_start();
+    let b64: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
+        .collect();
+    if b64.len() < 8 {
+        return None;
+    }
+    let bytes = base64_decode(&b64)?;
+    if bytes.len() < 2 || bytes.len() % 2 != 0 {
+        return None;
+    }
+    let utf16: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    String::from_utf16(&utf16).ok()
+}
+
+/// Minimal standard-alphabet base64 decoder (RFC 4648, with padding) --
+/// avoids pulling in a dependency for the one narrow use above.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let clean: Vec<u8> = input.bytes().filter(|&b| b != b'=').collect();
+    let mut out = Vec::with_capacity(clean.len() * 3 / 4);
+    for chunk in clean.chunks(4) {
+        let vals: Vec<u8> = chunk.iter().map(|&b| val(b)).collect::<Option<Vec<_>>>()?;
+        match vals.len() {
+            4 => {
+                out.push((vals[0] << 2) | (vals[1] >> 4));
+                out.push((vals[1] << 4) | (vals[2] >> 2));
+                out.push((vals[2] << 6) | vals[3]);
+            }
+            3 => {
+                out.push((vals[0] << 2) | (vals[1] >> 4));
+                out.push((vals[1] << 4) | (vals[2] >> 2));
+            }
+            2 => {
+                out.push((vals[0] << 2) | (vals[1] >> 4));
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
 fn shannon_entropy(s: &str) -> f64 {
     if s.is_empty() {
         return 0.0;
@@ -118,6 +190,20 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
         return None;
     }
 
+    // A successfully-decoded -EncodedCommand/-enc payload is scored on its
+    // DECODED content, not the base64 wrapper -- see decode_encoded_command's
+    // own doc comment for the false-positive class this closes (the wrapper
+    // itself trivially satisfies both the obfuscation-marker check and the
+    // long-encoded-blob check for EVERY encoded command regardless of what's
+    // inside, since that's mechanically what base64-encoding produces; a
+    // completely benign `cd C:\dev\...` and a real attacker's payload both
+    // scored identically on the wrapper alone). Falls back to scoring the
+    // raw cmdline when decoding fails (a malformed/partial argument, e.g.
+    // this tool's own 200-char cmdline_head truncation cutting mid-base64)
+    // so nothing goes unscored just because a real payload got cut off.
+    let scored_text = decode_encoded_command(cmdline).unwrap_or_else(|| cmdline.to_string());
+    let scored: &str = &scored_text;
+
     let mut score = 0u32;
     let mut reasons = Vec::new();
     // Tracks whether a signal harder to trigger by accident than either
@@ -133,18 +219,18 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
         reasons.push(format!("long command line ({} chars)", cmdline.len()));
     }
 
-    if let Some(m) = ip_re().find(cmdline) {
+    if let Some(m) = ip_re().find(scored) {
         score += 2;
         reasons.push(format!("embedded IP literal ({})", m.as_str()));
         has_strong_signal = true;
     }
-    if url_re().is_match(cmdline) {
+    if url_re().is_match(scored) {
         score += 1;
         reasons.push("embedded URL literal".to_string());
         has_strong_signal = true;
     }
 
-    if let Some(len) = has_long_encoded_blob(cmdline) {
+    if let Some(len) = has_long_encoded_blob(scored) {
         score += 2;
         reasons.push(format!("long contiguous encoded-looking blob ({len} chars, base64/hex-alphabet run)"));
         has_strong_signal = true;
@@ -152,7 +238,7 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
 
     let hits: Vec<&str> = OBFUSCATION_MARKERS
         .iter()
-        .filter(|m| cmdline.contains(*m))
+        .filter(|m| scored.contains(*m))
         .copied()
         .collect();
     if !hits.is_empty() {
@@ -161,11 +247,11 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
         has_strong_signal = true;
     }
 
-    let symbol_count = cmdline
+    let symbol_count = scored
         .chars()
         .filter(|c| !c.is_alphanumeric() && !c.is_whitespace())
         .count();
-    let density = symbol_count as f64 / cmdline.len() as f64;
+    let density = symbol_count as f64 / scored.len().max(1) as f64;
     if density > 0.30 {
         score += 1;
         reasons.push(format!(
@@ -192,7 +278,7 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
     // the entropy-alone false-positive gap. Nothing here changes severity:
     // anything that still crosses the score>=3 bar fires CRITICAL exactly
     // as before.
-    let entropy = shannon_entropy(cmdline);
+    let entropy = shannon_entropy(scored);
     if entropy > 5.2 && has_strong_signal {
         score += 3;
         reasons.push(format!("high content entropy ({entropy:.2} bits/char, packed/encrypted-looking)"));
