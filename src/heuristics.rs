@@ -337,7 +337,23 @@ const KNOWN_NAME_HOMES: &[(&str, &[&str])] = &[
     ("lsm.exe", &["\\windows\\system32"]),
     ("searchindexer.exe", &["\\windows"]),
     // Common third-party runtimes -- their real install roots.
-    ("node.exe", &["\\nodejs", "\\program files\\nodejs", "appdata\\roaming\\nvm", "appdata\\local\\fnm"]),
+    (
+        "node.exe",
+        &[
+            "\\nodejs",
+            "\\program files\\nodejs",
+            "appdata\\roaming\\nvm",
+            "appdata\\local\\fnm",
+            // Adobe Creative Cloud Experience bundles its own signed
+            // Node.js runtime for internal tooling at this exact path --
+            // live-verified (Get-AuthenticodeSignature: Valid; a genuine
+            // Node.js 18.20.2 binary, not a masquerade) after it recurred
+            // at the identical time of day (09:32:02) on two different
+            // days, matching a scheduled Adobe background task rather than
+            // a one-off.
+            "\\adobe\\adobe creative cloud experience\\libs",
+        ],
+    ),
     ("node", &["/usr/", "/opt/", "/.nvm/", "/.fnm/", "/.local/"]),
     ("python.exe", &["\\python", "\\program files"]),
     ("chrome.exe", &["\\google\\chrome", "\\program files"]),

@@ -262,6 +262,20 @@ impl Config {
                 // matters for its real shape (idle, then a burst).
                 "agentplug-runner.exe".to_string(),
                 "agentplug-runner".to_string(),
+                // grep.exe (Git-for-Windows' usr/bin/grep, and its Unix
+                // equivalents): a codebase-search tool's whole job is
+                // reading large amounts of file data quickly across many
+                // files -- the exact "drive scanning/harvesting" shape this
+                // detector looks for, but as its own normal, expected
+                // operation. Live-witnessed: 34 CRITICALs across 5 days, all
+                // 'grep.exe', both absolute-burst and relative-spike paths,
+                // recurring in the same dense bursts (a large `grep -r`
+                // across a big repo hits many polls in a row) rather than a
+                // single one-off -- a real scanning/harvesting process would
+                // look identical by design, but a search tool doing exactly
+                // what it's for is not evidence of anything.
+                "grep.exe".to_string(),
+                "grep".to_string(),
             ],
             known_high_throughput_tool_multiplier: 6.0,
             // agentplug-runner.exe is gm's own dispatch daemon: its exec_js
