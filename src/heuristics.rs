@@ -108,41 +108,66 @@ pub fn decode_encoded_command(cmdline: &str) -> Option<String> {
 /// just PowerShell's specific -EncodedCommand format, which is the right
 /// scope: a real payload could be base64-wrapped in either encoding.
 fn decode_one_encoded_command(text: &str) -> Option<String> {
-    let flag_pos = text
-        .find("-EncodedCommand")
-        .map(|i| i + "-EncodedCommand".len())
-        .or_else(|| text.find("-enc ").map(|i| i + "-enc".len()))
-        .or_else(|| text.find("$EncodedCommand = '").map(|i| i + "$EncodedCommand = '".len()))
-        .or_else(|| text.find("$EncodedCommand='").map(|i| i + "$EncodedCommand='".len()))?;
-    let rest = text[flag_pos..].trim_start();
-    let b64: String = rest
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
-        .collect();
-    if b64.len() < 8 {
-        return None;
+    // Collect every candidate flag/assignment occurrence in the text, in
+    // order, rather than only the first pattern that matches anywhere --
+    // live-witnessed: a harness-generated dispatch line like
+    // `powershell -NoProfile -EncodedCommand $EncodedCommand` contains a
+    // bare `-EncodedCommand` flag (referencing a variable, no inline
+    // base64 after it) BEFORE the real `$EncodedCommand = '<base64>'`
+    // assignment earlier in the same script. Priority-ordered `.or_else`
+    // picks whichever PATTERN ranks first and stops there even when that
+    // specific occurrence has no usable payload, so recursion silently
+    // stalled one layer short of the real content -- the same
+    // false-positive shape as the original single-encoding bug, just one
+    // level deeper. Trying every occurrence of every pattern, in the order
+    // they appear, and moving on when one doesn't yield valid base64
+    // generalizes correctly to any mix/order of these shapes in one script.
+    let mut candidates: Vec<usize> = Vec::new();
+    for pat in ["-EncodedCommand", "-enc ", "$EncodedCommand = '", "$EncodedCommand='"] {
+        let mut start = 0;
+        while let Some(i) = text[start..].find(pat) {
+            let abs = start + i;
+            candidates.push(abs + pat.len());
+            start = abs + pat.len();
+        }
     }
-    let bytes = base64_decode(&b64)?;
+    candidates.sort_unstable();
 
-    if bytes.len() >= 2 && bytes.len() % 2 == 0 {
-        let utf16: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        if let Ok(s) = String::from_utf16(&utf16) {
-            // A real UTF-16LE PowerShell command is overwhelmingly ASCII
-            // text with the occasional wide char, not dense with U+0100+
-            // code points -- decoding arbitrary UTF-8 bytes as UTF-16LE
-            // can still "succeed" (any even-length byte sequence is valid
-            // UTF-16 code units) while producing garbled non-text. Prefer
-            // this result only when it looks like real text; otherwise
-            // fall through to the UTF-8 attempt below.
-            let non_ascii_ratio =
-                s.chars().filter(|c| !c.is_ascii()).count() as f64 / s.chars().count().max(1) as f64;
-            if non_ascii_ratio < 0.2 {
-                return Some(s);
+    for flag_pos in candidates {
+        let rest = text[flag_pos..].trim_start();
+        let b64: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
+            .collect();
+        if b64.len() < 8 {
+            continue;
+        }
+        let Some(bytes) = base64_decode(&b64) else { continue };
+
+        if bytes.len() >= 2 && bytes.len() % 2 == 0 {
+            let utf16: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            if let Ok(s) = String::from_utf16(&utf16) {
+                // A real UTF-16LE PowerShell command is overwhelmingly ASCII
+                // text with the occasional wide char, not dense with U+0100+
+                // code points -- decoding arbitrary UTF-8 bytes as UTF-16LE
+                // can still "succeed" (any even-length byte sequence is valid
+                // UTF-16 code units) while producing garbled non-text. Prefer
+                // this result only when it looks like real text; otherwise
+                // fall through to the UTF-8 attempt below.
+                let non_ascii_ratio =
+                    s.chars().filter(|c| !c.is_ascii()).count() as f64 / s.chars().count().max(1) as f64;
+                if non_ascii_ratio < 0.2 {
+                    return Some(s);
+                }
             }
+        }
+
+        if let Ok(s) = String::from_utf8(bytes) {
+            return Some(s);
         }
     }
 
-    String::from_utf8(bytes).ok()
+    None
 }
 
 /// Minimal standard-alphabet base64 decoder (RFC 4648, with padding) --
