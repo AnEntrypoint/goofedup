@@ -1,6 +1,6 @@
 [package]
 name = "goofedup"
-version = "0.1.36"
+version = "0.1.37"
 edition = "2021"
 description = "Cross-platform structural-anomaly watcher: catches malware by shape, not signature."
 license = "MIT"
