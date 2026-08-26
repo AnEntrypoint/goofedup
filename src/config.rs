@@ -65,6 +65,29 @@ pub struct Config {
     pub known_high_throughput_tool_names: Vec<String>,
     pub known_high_throughput_tool_multiplier: f64,
 
+    /// Root directories that only an OS installer or an administrator/root
+    /// can write to (`C:\Windows`, `C:\Program Files*` on Windows; `/usr`,
+    /// `/System`, `/Applications` on macOS; `/usr`, `/opt`, `/bin`, `/sbin`
+    /// on Linux) -- a fundamentally different trust basis than
+    /// `known_high_throughput_tool_names` above: that list says "this NAME
+    /// is known to burst," which only ever covers tools already seen and
+    /// degrades into a whitelist-of-the-week; this says "a binary an
+    /// attacker cannot silently drop a file into is not a plausible drive-
+    /// harvester," which covers any legitimate vendor/system tool doing
+    /// bulk I/O as its normal job (an archiver unpacking a large tree, an
+    /// IDE indexing a workspace, a COM surrogate doing thumbnail/search
+    /// work) without needing its name enumerated first. Live-witnessed
+    /// false positives of exactly this shape and nothing else in common:
+    /// `tar.exe` (C:\Program Files\Git\usr\bin), `Code.exe` (C:\Program
+    /// Files\Microsoft VS Code), `dllhost.exe` (C:\Windows\System32) --
+    /// three unrelated binaries whose only shared property is running from
+    /// a location a real attacker's dropped payload never occupies (writing
+    /// there requires the elevation a compromise doesn't grant for free).
+    /// Applied identically to both burst paths via the same
+    /// `known_high_throughput_tool_multiplier`, not a separate exemption --
+    /// a genuinely extreme read from a vendor-root binary still alerts.
+    pub os_vendor_roots: Vec<PathBuf>,
+
     /// Parent-process names (case-insensitive) known to legitimately spawn
     /// interpreters with obfuscated-looking command lines as their normal
     /// operating shape -- AI-assistant/automation harnesses that pass
@@ -105,6 +128,16 @@ impl Config {
         let mut bootstrap_watch = Vec::new();
         let mut backup_sibling_roots = Vec::new();
         let mut allowed_exec_roots = Vec::new();
+        // A STRICT subset of allowed_exec_roots below: only the roots an
+        // attacker cannot write to without the elevation a compromise
+        // doesn't grant for free (the OS install tree, the vendor
+        // application-install tree). Deliberately excludes the
+        // user-writable dev-tool homes (.cargo, .local, LOCALAPPDATA, etc.)
+        // that share allowed_exec_roots for the unrelated process-PATH
+        // check -- those are fine places to run FROM, but not a reason to
+        // expect bulk I/O to be safe, since a compromise can write there
+        // freely.
+        let mut os_vendor_roots = Vec::new();
 
         #[cfg(target_os = "windows")]
         {
@@ -146,13 +179,16 @@ impl Config {
                 allowed_exec_roots.push(home.join(dev_home));
             }
             if let Ok(pf) = std::env::var("ProgramFiles") {
-                allowed_exec_roots.push(PathBuf::from(pf));
+                allowed_exec_roots.push(PathBuf::from(pf.clone()));
+                os_vendor_roots.push(PathBuf::from(pf));
             }
             if let Ok(pf86) = std::env::var("ProgramFiles(x86)") {
-                allowed_exec_roots.push(PathBuf::from(pf86));
+                allowed_exec_roots.push(PathBuf::from(pf86.clone()));
+                os_vendor_roots.push(PathBuf::from(pf86));
             }
             if let Ok(windir) = std::env::var("WINDIR") {
-                allowed_exec_roots.push(PathBuf::from(windir));
+                allowed_exec_roots.push(PathBuf::from(windir.clone()));
+                os_vendor_roots.push(PathBuf::from(windir));
             }
         }
 
@@ -166,6 +202,12 @@ impl Config {
             allowed_exec_roots.push(PathBuf::from("/bin"));
             allowed_exec_roots.push(PathBuf::from("/sbin"));
             allowed_exec_roots.push(home.join(".local"));
+            os_vendor_roots.push(PathBuf::from("/Applications"));
+            os_vendor_roots.push(PathBuf::from("/usr"));
+            os_vendor_roots.push(PathBuf::from("/opt"));
+            os_vendor_roots.push(PathBuf::from("/System"));
+            os_vendor_roots.push(PathBuf::from("/bin"));
+            os_vendor_roots.push(PathBuf::from("/sbin"));
         }
 
         #[cfg(target_os = "linux")]
@@ -177,6 +219,10 @@ impl Config {
             allowed_exec_roots.push(PathBuf::from("/sbin"));
             allowed_exec_roots.push(home.join(".local"));
             allowed_exec_roots.push(home.join(".cargo"));
+            os_vendor_roots.push(PathBuf::from("/usr"));
+            os_vendor_roots.push(PathBuf::from("/opt"));
+            os_vendor_roots.push(PathBuf::from("/bin"));
+            os_vendor_roots.push(PathBuf::from("/sbin"));
         }
 
         allowed_exec_roots.push(home.join(".goofedup"));
@@ -209,6 +255,7 @@ impl Config {
             ],
             deny_exec_path_fragments,
             allowed_exec_roots,
+            os_vendor_roots,
             scan_distinct_ports_threshold: 20,
             // Live-witnessed false-positive calibration: a desktop browser
             // loading a normal page fans out to 15-27 distinct CDN hosts in

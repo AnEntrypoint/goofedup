@@ -219,7 +219,24 @@ fn check_read_burst(
     let name_lower = name.to_lowercase();
     let is_known_high_throughput_tool =
         cfg.known_high_throughput_tool_names.iter().any(|n| n.to_lowercase() == name_lower);
-    let effective_absolute_threshold = if is_known_high_throughput_tool {
+    // A name-independent trust signal alongside the name list above: a
+    // binary actually running from an OS/vendor root (Program Files,
+    // C:\Windows, /usr, /System, ...) is not a plausible drive-harvester
+    // regardless of what it's called, since planting a file there requires
+    // elevation a compromise doesn't grant for free -- covers a legitimate
+    // vendor tool's bulk I/O (an archiver, an IDE indexing a workspace, a
+    // COM surrogate) without enumerating its name first. See
+    // Config::os_vendor_roots' own doc comment for the live-witnessed
+    // false positives (tar.exe, Code.exe, dllhost.exe) that share no
+    // property except this one.
+    let exe_path_lower = p.exe().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let runs_from_os_vendor_root = !exe_path_lower.is_empty()
+        && cfg.os_vendor_roots.iter().any(|root| {
+            let root_str = root.to_string_lossy().to_lowercase();
+            !root_str.is_empty() && exe_path_lower.starts_with(&root_str)
+        });
+    let gets_high_throughput_relaxation = is_known_high_throughput_tool || runs_from_os_vendor_root;
+    let effective_absolute_threshold = if gets_high_throughput_relaxation {
         (cfg.file_read_burst_absolute_bytes_per_poll as f64 * cfg.known_high_throughput_tool_multiplier) as u64
     } else {
         cfg.file_read_burst_absolute_bytes_per_poll
@@ -229,7 +246,7 @@ fn check_read_burst(
     // (live-witnessed: chrome/firefox/Discord all recorded 8-15x spikes
     // during ordinary page loads), so a known high-throughput name must
     // clear a proportionally higher multiple of its own average too.
-    let effective_relative_multiplier = if is_known_high_throughput_tool {
+    let effective_relative_multiplier = if gets_high_throughput_relaxation {
         cfg.file_read_burst_relative_multiplier * cfg.known_high_throughput_tool_multiplier
     } else {
         cfg.file_read_burst_relative_multiplier
