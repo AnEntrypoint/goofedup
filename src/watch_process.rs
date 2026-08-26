@@ -488,7 +488,17 @@ fn inspect_new_process(
     });
     if is_watched_interp {
         if let Some(v) = score_command_line(&cmdline) {
-            let head: String = cmdline.chars().take(200).collect();
+            // 200 chars was long enough to show an -EncodedCommand wrapper's
+            // own base64 head, but for a PLAIN inline script (`node -e
+            // "<source>"`, no encoding at all) it shows nothing past the
+            // interpreter invocation itself -- live-witnessed: a
+            // c2-shaped-process alert on a bare `node.exe -e` with no
+            // decoded_head available (not an encoded-command shape) left no
+            // way to tell a real payload from a benign automation script
+            // without waiting to catch the process alive. 1200 chars covers
+            // the actual scored content for the large majority of real
+            // one-liners this project has captured this session.
+            let head: String = cmdline.chars().take(1200).collect();
             // When the command decoded (an -EncodedCommand/-enc/nested
             // $EncodedCommand shape that score_command_line actually
             // scored the DECODED content of, per its own doc comment),

@@ -40,6 +40,29 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"https?://[^\s'\x22]+").unwrap())
 }
 
+/// True when a `http(s)://` URL's host is `localhost` or a non-routable IP
+/// (see is_non_routable_ip) -- the same "can this ever actually be a C2
+/// endpoint" question the IP-literal check already asks, applied to the URL
+/// check too, since a URL and a bare IP literal are the same underlying
+/// signal (a network destination) spelled two different ways. Live-
+/// witnessed: the identical recurring node.exe automation one-liner that
+/// produced loopback-IP false positives also produces this shape via
+/// `fetch('http://127.0.0.1:PORT/...')` or `http://localhost:PORT/...`
+/// literally in its source, scored as "embedded URL literal" with no
+/// distinction from a real hardcoded C2 URL. The real incident's URLs
+/// (http://23.27.13.135:443, :80) have a fully routable host and are
+/// unaffected.
+fn url_host_is_non_routable(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host_and_port = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host = host_and_port.rsplit_once(':').map(|(h, _)| h).unwrap_or(host_and_port);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost") || is_non_routable_ip(host)
+}
+
 /// Generic obfuscation/exfil tells that show up across many unrelated
 /// malware families and toolchains (packers, stealers, loaders, C2
 /// beacons), not specific to any one incident. Each is a small BONUS on top
@@ -337,7 +360,7 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
         reasons.push(format!("embedded IP literal ({})", m.as_str()));
         has_strong_signal = true;
     }
-    if url_re().is_match(scored) {
+    if url_re().find_iter(scored).any(|m| !url_host_is_non_routable(m.as_str())) {
         score += 1;
         reasons.push("embedded URL literal".to_string());
         has_strong_signal = true;
