@@ -48,6 +48,26 @@ Ctrl+C to stop. Logs to `~/.goofedup/goofedup.log` (and stdout).
 ./goofedup --show-config   # print the resolved watch list and thresholds, then exit
 ```
 
+### Live-tunable config
+
+Every threshold and list above can be overridden without a rebuild or
+restart by hand-editing `~/.goofedup/goofedup.config.json` -- a partial
+JSON file naming only the fields you want to change (anything you leave
+out stays at its computed default). It's checked for changes on the
+regular poll interval, so an edit takes effect within a few seconds. A
+missing file is normal (pure computed defaults); a malformed one logs a
+warning and keeps running on the last-known-good config rather than
+crashing. `--show-config` (and the GUI's *Show Config*) mark which values
+are currently coming from the file with `(from config file)`.
+
+```json
+{
+  "poll_interval_secs": 5,
+  "file_read_burst_absolute_bytes_per_poll": 524288000,
+  "known_high_throughput_tool_names": ["mytool.exe"]
+}
+```
+
 ## Windows GUI (goofedup-gui.exe)
 
 For everyday use on Windows, `goofedup-gui.exe` runs the same watchers with no

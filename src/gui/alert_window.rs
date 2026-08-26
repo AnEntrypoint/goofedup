@@ -1268,11 +1268,17 @@ pub fn show_alerts(title: &str, history: Arc<History>) -> Result<(), String> {
     rx.recv().unwrap_or_else(|_| Err("alert window thread exited before signaling readiness".to_string()))
 }
 
-pub fn show_config(title: &str, sections: &[(&str, &str, Vec<(String, String)>)]) -> Result<(), String> {
+pub fn show_config(title: &str, sections: &[crate::config::ConfigSection]) -> Result<(), String> {
     let title = title.to_string();
     let sections: Vec<(String, String, Vec<(String, String)>)> = sections
         .iter()
-        .map(|(name, description, rows)| (name.to_string(), description.to_string(), rows.clone()))
+        .map(|s| {
+            (
+                s.title.to_string(),
+                s.description.to_string(),
+                s.rows.iter().map(|r| (r.label.clone(), r.value.clone())).collect(),
+            )
+        })
         .collect();
     let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::spawn(move || create_config_window_and_pump(&title, sections, tx));

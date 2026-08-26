@@ -6,7 +6,7 @@
 // block, no packet capture required).
 
 use crate::alert::AlertSink;
-use crate::config::Config;
+use crate::config::SharedConfig;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -34,19 +34,23 @@ struct ProcWindow {
 /// (scanning a subnet) commonly touches more than one or two services.
 const HOST_SWEEP_MIN_PORT_VARIETY: usize = 3;
 
-pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
-    alerts.info(
-        "network",
-        format!(
-            "watching outbound connections (poll every {}s) for scan behavior ({}+ ports or {}+ hosts within {}s from one process)",
-            cfg.poll_interval_secs, cfg.scan_distinct_ports_threshold, cfg.scan_distinct_hosts_threshold, cfg.scan_window_secs
-        ),
-    );
+pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
+    {
+        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        alerts.info(
+            "network",
+            format!(
+                "watching outbound connections (poll every {}s) for scan behavior ({}+ ports or {}+ hosts within {}s from one process)",
+                cfg.poll_interval_secs, cfg.scan_distinct_ports_threshold, cfg.scan_distinct_hosts_threshold, cfg.scan_window_secs
+            ),
+        );
+    }
 
     let mut windows: HashMap<u32, ProcWindow> = HashMap::new();
     let mut known_connections: HashSet<(u32, String, u16)> = HashSet::new();
 
     while running.load(Ordering::Relaxed) {
+        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs));
 
         let conns = list_connections();
@@ -145,25 +149,29 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     }
 }
 
-pub fn run_firewall_drift(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
+pub fn run_firewall_drift(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     let mut last_state: HashMap<String, bool> = HashMap::new();
     for (name, enabled) in firewall_profile_state() {
         last_state.insert(name, enabled);
     }
-    alerts.info(
-        "firewall-drift",
-        format!(
-            "polling firewall state every {}s -- baseline: {}",
-            cfg.poll_interval_secs * 5,
-            last_state
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    );
+    {
+        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        alerts.info(
+            "firewall-drift",
+            format!(
+                "polling firewall state every {}s -- baseline: {}",
+                cfg.poll_interval_secs * 5,
+                last_state
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    }
 
     while running.load(Ordering::Relaxed) {
+        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs * 5));
         for (name, enabled) in firewall_profile_state() {
             if let Some(prev) = last_state.get(&name) {

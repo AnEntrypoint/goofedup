@@ -1,7 +1,19 @@
 // Central tunables. Every detector reads from here so the whole posture can
 // be adjusted without hunting through module internals.
+//
+// Config itself stays a plain, always-fully-populated struct built by
+// default_for_platform() -- the platform/env-var detection logic below is
+// the one thing a config file must never have to reimplement. Runtime
+// tuning layers OVER this via ConfigOverrides (see below): an all-Option
+// struct deserialized from ~/.goofedup/goofedup.config.json and merged on
+// top, so a hand-edited file only needs to name the fields it actually wants
+// to change. SharedConfig is the hot-reloadable handle every consumer holds;
+// see config_reload.rs for the load/merge/reload-loop machinery built on
+// top of the types defined here.
 
+use serde::Deserialize;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 
 pub struct Config {
     /// Known-tiny bootstrap/loader files that must never grow past a sane
@@ -124,13 +136,464 @@ pub struct Config {
     pub poll_interval_secs: u64,
 
     pub log_path: PathBuf,
+
+    // -- Promoted from inline `const`s so they become config-tunable too.
+    // Defaults below are bit-for-bit identical to the constants they
+    // replaced; their calibration-history doc comments moved here with
+    // them rather than being duplicated or dropped.
+    /// How many of the last N polls (a fixed-size sliding window, not
+    /// strict back-to-back consecutiveness) must score as a spike before
+    /// file-read-burst actually alerts. A real drive-scanning/harvesting
+    /// process sustains elevated reads across a short window; a legitimate
+    /// app's burst (a page load, a cache write, an update check) is
+    /// characteristically one-shot. Live-witnessed false positives
+    /// (firefox.exe, Discord.exe) were both single-poll spikes; requiring
+    /// persistence within a window eliminates that shape. A STRICT
+    /// back-to-back-with-no-gap requirement was tried first and
+    /// live-witnessed to fail: a real process whose own read rounds are
+    /// separated by even one intervening near-zero-delta poll (a genuinely
+    /// common shape -- disk I/O is bursty, not perfectly uniform, even for
+    /// a real scanner) never accumulates past 1 under strict
+    /// consecutiveness, since a single zero-delta poll resets the count to
+    /// 0 and erases all prior progress. A sliding window tolerates that gap
+    /// while still requiring genuine persistence, not one sample.
+    pub read_burst_window_size: usize,
+    /// See `read_burst_window_size`'s doc comment for the windowed-
+    /// persistence rationale -- this is the count of spikes-in-window
+    /// required before it counts as sustained rather than one-shot.
+    pub read_burst_required_spikes_in_window: usize,
+    /// A read-burst also flagged by the existing process-path checks
+    /// (denied or unlisted exec path -- reused, not reinvented) is far
+    /// stronger evidence than volume alone, so it clears the absolute floor
+    /// at this fraction of the normal bar. This is the volume-alone
+    /// false-positive class's actual fix: 223 CRITICALs in one operating
+    /// log, all from well-located, ordinarily-installed dev tools with no
+    /// other red flag -- corroboration lets a genuinely suspicious
+    /// combination (unusual location AND a large read) still alert well
+    /// below the raised floor, while volume by itself must clear the much
+    /// higher bar.
+    pub read_burst_corroborated_threshold_fraction: f64,
+    /// Live-witnessed: a process whose own baseline is already substantial
+    /// (python.exe reading 60MB against a 13-24MB/poll established average)
+    /// is not anomalous relative to ITSELF just because the raw byte count
+    /// clears the absolute floor -- the absolute check exists to catch a
+    /// scanner even on its very first observation (no baseline yet), not to
+    /// re-flag a consistently high-throughput process on every poll near
+    /// its own normal level. A read within this multiple of the process's
+    /// own established baseline is excluded from the absolute-burst check
+    /// even if it clears the raw threshold.
+    pub read_burst_baseline_exemption_multiplier: f64,
+    /// A live-witnessed false-positive source: a low EMA baseline built up
+    /// during a genuinely quiet stretch (an idle browser tab) makes any
+    /// ordinary burst of real activity look like a huge relative spike.
+    /// This floor requires the baseline itself to already reflect a
+    /// meaningful amount of steady-state activity (in bytes/poll) before
+    /// the relative check even engages, not just "greater than noise."
+    pub read_burst_baseline_warm_up_floor_bytes: f64,
+    /// EMA smoothing factor for the read-rate baseline -- low enough that
+    /// one legitimate burst (a real build, a real backup job starting)
+    /// doesn't permanently poison the baseline as "normal," but the
+    /// baseline still adapts over a handful of polls to genuine sustained
+    /// changes in a process's normal operating level.
+    pub read_burst_ema_alpha: f64,
+    /// Bound on how many nested `-EncodedCommand`/`$EncodedCommand = '...'`
+    /// layers the C2-shape decoder will unwrap before giving up -- exists so
+    /// a pathological or adversarial input can't force unbounded recursion,
+    /// not because any real legitimate or malicious sample observed so far
+    /// has needed more than a couple of layers.
+    pub c2_max_decode_depth: u32,
 }
 
 pub struct BootstrapEntry {
     pub search_root: PathBuf,
-    pub file_name: &'static str,
-    pub path_must_contain: &'static str,
+    pub file_name: String,
+    pub path_must_contain: String,
     pub max_bytes: u64,
+}
+
+/// All-`Option<T>` mirror of `Config`, deserialized from
+/// `~/.goofedup/goofedup.config.json` if present. `None` means "not
+/// overridden, use the platform-computed default from
+/// `Config::default_for_platform()`" -- a config file is a set of
+/// deviations from the computed baseline, never a full replacement, so
+/// `default_for_platform()`'s env-var/platform-detection logic never needs
+/// reimplementing in JSON. A `Vec<T>` override REPLACES the default list
+/// wholesale, it does not append -- simplest semantics, and matches "this
+/// list is wrong, here's my list" rather than an ambiguous merge rule.
+///
+/// `deny_unknown_fields` is deliberately NOT set: an older binary reading a
+/// newer config file (or vice versa) should ignore fields it doesn't
+/// recognize, not fail to start.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ConfigOverrides {
+    pub bootstrap_watch: Option<Vec<BootstrapEntryOverride>>,
+    pub backup_sibling_roots: Option<Vec<PathBuf>>,
+    pub watched_interpreters: Option<Vec<String>>,
+    pub deny_exec_path_fragments: Option<Vec<String>>,
+    pub allowed_exec_roots: Option<Vec<PathBuf>>,
+    pub scan_distinct_ports_threshold: Option<usize>,
+    pub scan_distinct_hosts_threshold: Option<usize>,
+    pub scan_window_secs: Option<u64>,
+    pub file_read_burst_absolute_bytes_per_poll: Option<u64>,
+    pub file_read_burst_relative_multiplier: Option<f64>,
+    pub file_read_burst_uncorroborated_ceiling_bytes: Option<u64>,
+    pub known_high_throughput_tool_names: Option<Vec<String>>,
+    pub known_high_throughput_tool_multiplier: Option<f64>,
+    pub os_vendor_roots: Option<Vec<PathBuf>>,
+    pub known_automation_parent_names: Option<Vec<String>>,
+    pub poll_interval_secs: Option<u64>,
+    pub log_path: Option<PathBuf>,
+    pub read_burst_window_size: Option<usize>,
+    pub read_burst_required_spikes_in_window: Option<usize>,
+    pub read_burst_corroborated_threshold_fraction: Option<f64>,
+    pub read_burst_baseline_exemption_multiplier: Option<f64>,
+    pub read_burst_baseline_warm_up_floor_bytes: Option<f64>,
+    pub read_burst_ema_alpha: Option<f64>,
+    pub c2_max_decode_depth: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct BootstrapEntryOverride {
+    pub search_root: PathBuf,
+    pub file_name: String,
+    pub path_must_contain: String,
+    pub max_bytes: u64,
+}
+
+/// Merges `overrides` onto `base` field-by-field: a `Some(v)` replaces the
+/// default, a `None` leaves the computed default untouched. An explicit
+/// function rather than a generic/macro-based merge -- more debuggable and
+/// greppable for ~23 fields than machinery that obscures which field maps
+/// to which.
+pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
+    if let Some(v) = &o.bootstrap_watch {
+        base.bootstrap_watch = v
+            .iter()
+            .map(|e| BootstrapEntry {
+                search_root: e.search_root.clone(),
+                file_name: e.file_name.clone(),
+                path_must_contain: e.path_must_contain.clone(),
+                max_bytes: e.max_bytes,
+            })
+            .collect();
+    }
+    if let Some(v) = &o.backup_sibling_roots {
+        base.backup_sibling_roots = v.clone();
+    }
+    if let Some(v) = &o.watched_interpreters {
+        base.watched_interpreters = v.clone();
+    }
+    if let Some(v) = &o.deny_exec_path_fragments {
+        base.deny_exec_path_fragments = v.clone();
+    }
+    if let Some(v) = &o.allowed_exec_roots {
+        base.allowed_exec_roots = v.clone();
+    }
+    if let Some(v) = o.scan_distinct_ports_threshold {
+        base.scan_distinct_ports_threshold = v;
+    }
+    if let Some(v) = o.scan_distinct_hosts_threshold {
+        base.scan_distinct_hosts_threshold = v;
+    }
+    if let Some(v) = o.scan_window_secs {
+        base.scan_window_secs = v;
+    }
+    if let Some(v) = o.file_read_burst_absolute_bytes_per_poll {
+        base.file_read_burst_absolute_bytes_per_poll = v;
+    }
+    if let Some(v) = o.file_read_burst_relative_multiplier {
+        base.file_read_burst_relative_multiplier = v;
+    }
+    if let Some(v) = o.file_read_burst_uncorroborated_ceiling_bytes {
+        base.file_read_burst_uncorroborated_ceiling_bytes = v;
+    }
+    if let Some(v) = &o.known_high_throughput_tool_names {
+        base.known_high_throughput_tool_names = v.clone();
+    }
+    if let Some(v) = o.known_high_throughput_tool_multiplier {
+        base.known_high_throughput_tool_multiplier = v;
+    }
+    if let Some(v) = &o.os_vendor_roots {
+        base.os_vendor_roots = v.clone();
+    }
+    if let Some(v) = &o.known_automation_parent_names {
+        base.known_automation_parent_names = v.clone();
+    }
+    if let Some(v) = o.poll_interval_secs {
+        base.poll_interval_secs = v;
+    }
+    if let Some(v) = &o.log_path {
+        base.log_path = v.clone();
+    }
+    if let Some(v) = o.read_burst_window_size {
+        base.read_burst_window_size = v;
+    }
+    if let Some(v) = o.read_burst_required_spikes_in_window {
+        base.read_burst_required_spikes_in_window = v;
+    }
+    if let Some(v) = o.read_burst_corroborated_threshold_fraction {
+        base.read_burst_corroborated_threshold_fraction = v;
+    }
+    if let Some(v) = o.read_burst_baseline_exemption_multiplier {
+        base.read_burst_baseline_exemption_multiplier = v;
+    }
+    if let Some(v) = o.read_burst_baseline_warm_up_floor_bytes {
+        base.read_burst_baseline_warm_up_floor_bytes = v;
+    }
+    if let Some(v) = o.read_burst_ema_alpha {
+        base.read_burst_ema_alpha = v;
+    }
+    if let Some(v) = o.c2_max_decode_depth {
+        base.c2_max_decode_depth = v;
+    }
+    base
+}
+
+/// The hot-reloadable handle every watcher thread holds. The OUTER Arc is
+/// what gets cloned per-thread (cheap, same as before); the inner Arc is
+/// what gets swapped on reload (a single pointer write under a brief
+/// write-lock) and is also what a reader clones once per poll iteration so
+/// that iteration sees a fully-consistent Config snapshot, never a mix of
+/// old and new fields. See config_reload.rs for the reload loop that
+/// actually calls `apply_reload`.
+pub type SharedConfig = Arc<RwLock<Arc<Config>>>;
+
+/// Swaps in a newly-loaded, already-merged Config. The write-lock is held
+/// only for the duration of the pointer assignment -- readers never block
+/// on anything but that instant, and this call never blocks on a slow
+/// reader either, since readers only ever hold a read-lock long enough to
+/// clone the inner Arc.
+pub fn apply_reload(shared: &SharedConfig, new_cfg: Config) {
+    *shared.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new_cfg);
+}
+
+pub struct ConfigRow {
+    pub label: String,
+    pub value: String,
+}
+
+pub struct ConfigSection {
+    pub title: &'static str,
+    pub description: &'static str,
+    pub rows: Vec<ConfigRow>,
+}
+
+/// Single source of truth for "what does the current config look like,
+/// human-readably" -- both the CLI's `--show-config` and the GUI's "Show
+/// Config" window call this same function and format the result for their
+/// own output, so there is exactly one place enumerating Config's fields
+/// instead of two independently hand-maintained lists silently drifting
+/// out of sync with each other and with the real struct (as they had:
+/// os_vendor_roots, known_high_throughput_tool_names,
+/// known_high_throughput_tool_multiplier, known_automation_parent_names,
+/// and file_read_burst_uncorroborated_ceiling_bytes were missing from both
+/// before this function existed).
+///
+/// A row whose value came from `overrides` rather than the computed
+/// default gets an explicit "(from config file)" suffix folded directly
+/// into its value string -- a deliberate choice over a separate
+/// is_overridden flag/column, since it needs no changes to the existing
+/// win32 list-view rendering in gui/alert_window.rs at all.
+pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigSection> {
+    fn marked(value: String, overridden: bool) -> String {
+        if overridden {
+            format!("{value} (from config file)")
+        } else {
+            value
+        }
+    }
+
+    vec![
+        ConfigSection {
+            title: "General",
+            description: "Basic runtime info: where logs are written and how often the background watchers poll.",
+            rows: vec![
+                ConfigRow { label: "Platform".to_string(), value: std::env::consts::OS.to_string() },
+                ConfigRow {
+                    label: "Log path".to_string(),
+                    value: marked(cfg.log_path.display().to_string(), overrides.log_path.is_some()),
+                },
+                ConfigRow {
+                    label: "Poll interval".to_string(),
+                    value: marked(format!("{}s", cfg.poll_interval_secs), overrides.poll_interval_secs.is_some()),
+                },
+            ],
+        },
+        ConfigSection {
+            title: "Bootstrap Watch",
+            description: "Known-tiny entry-point files that must never grow past a sane size -- a real trusted app loader file suddenly ballooning is the tell-tale sign of it being overwritten with a payload.",
+            rows: cfg
+                .bootstrap_watch
+                .iter()
+                .map(|e| ConfigRow {
+                    label: marked(
+                        e.search_root.join(&e.file_name).display().to_string(),
+                        overrides.bootstrap_watch.is_some(),
+                    ),
+                    value: format!("must contain '{}', > {} bytes", e.path_must_contain, e.max_bytes),
+                })
+                .collect(),
+        },
+        ConfigSection {
+            title: "Backup-Sibling Roots",
+            description: "Folders watched for a *.orig/*.bak-style backup file appearing next to a real one -- the copy an infector leaves behind to preserve the original while it replaces it.",
+            rows: cfg
+                .backup_sibling_roots
+                .iter()
+                .enumerate()
+                .map(|(i, r)| ConfigRow {
+                    label: format!("Root {}", i + 1),
+                    value: marked(r.display().to_string(), overrides.backup_sibling_roots.is_some()),
+                })
+                .collect(),
+        },
+        ConfigSection {
+            title: "Process Detection",
+            description: "Command lines are only inspected for these interpreters (avoids false-positiving on unrelated long command lines); paths containing these fragments are an instant flag for any process, regardless of name.",
+            rows: vec![
+                ConfigRow {
+                    label: "Watched interpreters".to_string(),
+                    value: marked(cfg.watched_interpreters.join(", "), overrides.watched_interpreters.is_some()),
+                },
+                ConfigRow {
+                    label: "Denied exec path fragments".to_string(),
+                    value: marked(cfg.deny_exec_path_fragments.join(", "), overrides.deny_exec_path_fragments.is_some()),
+                },
+            ],
+        },
+        ConfigSection {
+            title: "Allowed Exec Roots",
+            description: "Processes launching from one of these locations are treated as trusted and do not trigger the unusual-path warning -- launching from anywhere else still gets flagged for review, even a normally-legitimate install location, since a trusted location can still be compromised.",
+            rows: cfg
+                .allowed_exec_roots
+                .iter()
+                .enumerate()
+                .map(|(i, r)| ConfigRow {
+                    label: format!("Root {}", i + 1),
+                    value: marked(r.display().to_string(), overrides.allowed_exec_roots.is_some()),
+                })
+                .collect(),
+        },
+        ConfigSection {
+            title: "OS Vendor Roots",
+            description: "Root directories only an OS installer or administrator/root can write to -- a binary running from one of these gets a raised file-read-burst threshold regardless of its name, since a compromise can't silently plant a file here.",
+            rows: cfg
+                .os_vendor_roots
+                .iter()
+                .enumerate()
+                .map(|(i, r)| ConfigRow {
+                    label: format!("Root {}", i + 1),
+                    value: marked(r.display().to_string(), overrides.os_vendor_roots.is_some()),
+                })
+                .collect(),
+        },
+        ConfigSection {
+            title: "Known High-Throughput Tools",
+            description: "Process names known to legitimately sustain high burst reads as their normal operating shape -- a match raises the effective file-read-burst threshold, it does not exempt the process from detection.",
+            rows: vec![
+                ConfigRow {
+                    label: "Tool names".to_string(),
+                    value: marked(cfg.known_high_throughput_tool_names.join(", "), overrides.known_high_throughput_tool_names.is_some()),
+                },
+                ConfigRow {
+                    label: "Threshold multiplier".to_string(),
+                    value: marked(format!("{}x", cfg.known_high_throughput_tool_multiplier), overrides.known_high_throughput_tool_multiplier.is_some()),
+                },
+            ],
+        },
+        ConfigSection {
+            title: "Known Automation Parents",
+            description: "Parent-process names known to legitimately spawn interpreters with obfuscated-looking command lines as normal operating shape. Triage context only -- never changes c2-shaped-process severity.",
+            rows: vec![ConfigRow {
+                label: "Parent names".to_string(),
+                value: marked(cfg.known_automation_parent_names.join(", "), overrides.known_automation_parent_names.is_some()),
+            }],
+        },
+        ConfigSection {
+            title: "Network Scan Thresholds",
+            description: "A process opening connections to this many distinct destination ports or hosts within the window below is flagged as scanning behavior.",
+            rows: vec![
+                ConfigRow {
+                    label: "Distinct ports".to_string(),
+                    value: marked(format!("{}+", cfg.scan_distinct_ports_threshold), overrides.scan_distinct_ports_threshold.is_some()),
+                },
+                ConfigRow {
+                    label: "Distinct hosts".to_string(),
+                    value: marked(format!("{}+", cfg.scan_distinct_hosts_threshold), overrides.scan_distinct_hosts_threshold.is_some()),
+                },
+                ConfigRow {
+                    label: "Window".to_string(),
+                    value: marked(format!("{}s", cfg.scan_window_secs), overrides.scan_window_secs.is_some()),
+                },
+            ],
+        },
+        ConfigSection {
+            title: "File-Read-Burst Thresholds",
+            description: "Watches every running process for an unusual amount of file reading in one interval -- either an absolute amount, or a large multiple of that process's own recent average -- the tell-tale shape of drive scanning or harvesting.",
+            rows: vec![
+                ConfigRow {
+                    label: "Absolute burst".to_string(),
+                    value: marked(format_bytes(cfg.file_read_burst_absolute_bytes_per_poll), overrides.file_read_burst_absolute_bytes_per_poll.is_some()),
+                },
+                ConfigRow {
+                    label: "Relative spike multiplier".to_string(),
+                    value: marked(format!("{}x", cfg.file_read_burst_relative_multiplier), overrides.file_read_burst_relative_multiplier.is_some()),
+                },
+                ConfigRow {
+                    label: "Uncorroborated ceiling".to_string(),
+                    value: marked(format_bytes(cfg.file_read_burst_uncorroborated_ceiling_bytes), overrides.file_read_burst_uncorroborated_ceiling_bytes.is_some()),
+                },
+                ConfigRow {
+                    label: "Window size".to_string(),
+                    value: marked(cfg.read_burst_window_size.to_string(), overrides.read_burst_window_size.is_some()),
+                },
+                ConfigRow {
+                    label: "Required spikes in window".to_string(),
+                    value: marked(cfg.read_burst_required_spikes_in_window.to_string(), overrides.read_burst_required_spikes_in_window.is_some()),
+                },
+                ConfigRow {
+                    label: "Corroborated threshold fraction".to_string(),
+                    value: marked(cfg.read_burst_corroborated_threshold_fraction.to_string(), overrides.read_burst_corroborated_threshold_fraction.is_some()),
+                },
+                ConfigRow {
+                    label: "Baseline exemption multiplier".to_string(),
+                    value: marked(format!("{}x", cfg.read_burst_baseline_exemption_multiplier), overrides.read_burst_baseline_exemption_multiplier.is_some()),
+                },
+                ConfigRow {
+                    label: "Baseline warm-up floor".to_string(),
+                    value: marked(format_bytes(cfg.read_burst_baseline_warm_up_floor_bytes as u64), overrides.read_burst_baseline_warm_up_floor_bytes.is_some()),
+                },
+                ConfigRow {
+                    label: "EMA alpha".to_string(),
+                    value: marked(cfg.read_burst_ema_alpha.to_string(), overrides.read_burst_ema_alpha.is_some()),
+                },
+            ],
+        },
+        ConfigSection {
+            title: "C2-Shaped-Process Decoder",
+            description: "How deep the -EncodedCommand/nested-$EncodedCommand decoder recurses before giving up and scoring whatever it has -- bounded so a pathological input can't force unbounded recursion.",
+            rows: vec![ConfigRow {
+                label: "Max decode depth".to_string(),
+                value: marked(cfg.c2_max_decode_depth.to_string(), overrides.c2_max_decode_depth.is_some()),
+            }],
+        },
+    ]
+}
+
+fn format_bytes(b: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if b >= GB {
+        format!("{:.1}GB", b as f64 / GB as f64)
+    } else if b >= MB {
+        format!("{:.1}MB", b as f64 / MB as f64)
+    } else if b >= KB {
+        format!("{:.1}KB", b as f64 / KB as f64)
+    } else {
+        format!("{b}B")
+    }
 }
 
 impl Config {
@@ -158,8 +621,8 @@ impl Config {
                 let local = PathBuf::from(local);
                 bootstrap_watch.push(BootstrapEntry {
                     search_root: local.join("Discord"),
-                    file_name: "index.js",
-                    path_must_contain: "discord_desktop_core",
+                    file_name: "index.js".to_string(),
+                    path_must_contain: "discord_desktop_core".to_string(),
                     max_bytes: 2048,
                 });
                 backup_sibling_roots.push(local.join("Discord"));
@@ -425,11 +888,18 @@ impl Config {
             ],
             poll_interval_secs: 3,
             log_path,
+            read_burst_window_size: 4,
+            read_burst_required_spikes_in_window: 2,
+            read_burst_corroborated_threshold_fraction: 0.25,
+            read_burst_baseline_exemption_multiplier: 3.0,
+            read_burst_baseline_warm_up_floor_bytes: 512.0 * 1024.0,
+            read_burst_ema_alpha: 0.2,
+            c2_max_decode_depth: 4,
         }
     }
 }
 
-fn dirs_home() -> PathBuf {
+pub fn dirs_home() -> PathBuf {
     #[cfg(windows)]
     {
         if let Ok(p) = std::env::var("USERPROFILE") {
@@ -440,4 +910,11 @@ fn dirs_home() -> PathBuf {
         return PathBuf::from(p);
     }
     PathBuf::from(".")
+}
+
+/// Where the hot-reloadable override file lives -- sibling to the existing
+/// log file, under the same directory both binaries already create at
+/// startup.
+pub fn override_path(home: &std::path::Path) -> PathBuf {
+    home.join(".goofedup").join("goofedup.config.json")
 }

@@ -1,7 +1,11 @@
 // Pure, host-independent heuristics. Every function here takes plain data
 // (a command line string, a path string) and returns a verdict -- no OS
 // calls, no side effects, so they're identical on every platform and cheap
-// to reason about in isolation.
+// to reason about in isolation. One deliberate, narrow exception:
+// decode_encoded_command/score_command_line take a max_decode_depth
+// parameter (sourced from Config::c2_max_decode_depth by their callers) so
+// that bound is hot-tunable too, rather than threading the whole Config
+// through a module that otherwise has no config coupling at all.
 
 use regex::Regex;
 use std::sync::OnceLock;
@@ -127,11 +131,10 @@ const OBFUSCATION_MARKERS: &[&str] = &[
 /// function's concern -- the raw cmdline's other signals still apply
 /// either way since the caller falls back to scoring the original string
 /// when this returns None).
-pub fn decode_encoded_command(cmdline: &str) -> Option<String> {
-    const MAX_DECODE_DEPTH: u32 = 4;
+pub fn decode_encoded_command(cmdline: &str, max_decode_depth: u32) -> Option<String> {
     let first = decode_one_encoded_command(cmdline)?;
     let mut current = first;
-    for _ in 0..MAX_DECODE_DEPTH {
+    for _ in 0..max_decode_depth {
         match decode_one_encoded_command(&current) {
             Some(next) => current = next,
             None => break,
@@ -311,7 +314,7 @@ fn has_long_encoded_blob(s: &str) -> Option<usize> {
 /// embedded IP/URL literals, a long encoded-blob run, and only a small
 /// bonus for known generic markers -- a completely novel payload with none
 /// of the marker strings can still score purely on shape.
-pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
+pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdict> {
     if cmdline.len() < 300 {
         return None;
     }
@@ -337,7 +340,7 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
     // raw cmdline when decoding fails (a malformed/partial argument, e.g.
     // this tool's own 200-char cmdline_head truncation cutting mid-base64)
     // so nothing goes unscored just because a real payload got cut off.
-    let scored_text = decode_encoded_command(cmdline).unwrap_or_else(|| cmdline.to_string());
+    let scored_text = decode_encoded_command(cmdline, max_decode_depth).unwrap_or_else(|| cmdline.to_string());
     let scored: &str = &scored_text;
 
     let mut score = 0u32;

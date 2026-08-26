@@ -7,7 +7,7 @@
 // three OSes from one codebase.
 
 use crate::alert::AlertSink;
-use crate::config::Config;
+use crate::config::{Config, SharedConfig};
 use crate::heuristics::{decode_encoded_command, is_denied_exec_path, is_unlisted_exec_path, score_command_line, score_process_name};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,43 +25,33 @@ struct ReadTracker {
     /// re-flagged as a fresh burst on the very next poll.
     avg_delta: f64,
     alerted_this_burst: bool,
-    /// How many of the last WINDOW_SIZE polls (a fixed-size sliding window,
-    /// not strict back-to-back consecutiveness) scored as a relative spike.
-    /// A real drive-scanning/harvesting process sustains elevated reads
-    /// across a short window; a legitimate app's burst (a page load, a
-    /// cache write, an update check) is characteristically one-shot.
-    /// Live-witnessed false positives (firefox.exe, Discord.exe) were both
-    /// single-poll spikes; requiring persistence within a window eliminates
-    /// that shape. A STRICT back-to-back-with-no-gap requirement was tried
-    /// first and live-witnessed to fail: a real process whose own read
-    /// rounds are separated by even one intervening near-zero-delta poll
-    /// (a genuinely common shape -- disk I/O is bursty, not perfectly
-    /// uniform, even for a real scanner) never accumulates past 1 under
-    /// strict consecutiveness, since a single zero-delta poll resets the
-    /// count to 0 and erases all prior progress. A sliding window tolerates
-    /// that gap while still requiring genuine persistence, not one sample.
-    relative_spike_window: [bool; Self::WINDOW_SIZE],
+    /// How many of the last `window_size` polls (a fixed-size sliding
+    /// window, not strict back-to-back consecutiveness) scored as a
+    /// relative spike -- see Config::read_burst_window_size's own doc
+    /// comment for the full rationale. Sized at construction from that
+    /// config field rather than a const-generic array length, since the
+    /// window size is now runtime-tunable: a Vec costs one allocation per
+    /// newly-tracked PID (cached across polls in the caller's
+    /// HashMap<Pid, ReadTracker>), not per poll.
+    relative_spike_window: Vec<bool>,
     /// Same windowed-persistence requirement as relative_spike_window, but
     /// for the absolute-burst path. Live-witnessed: this path originally
     /// had no baseline/persistence gating at all, so a legitimate dev tool
     /// loading a large plugin file on a single poll (agentplug-runner.exe
     /// reading hundreds of MB of WASM) alerted immediately every time,
     /// bypassing the relative path's persistence fix entirely.
-    absolute_burst_window: [bool; Self::WINDOW_SIZE],
+    absolute_burst_window: Vec<bool>,
     window_pos: usize,
 }
 
 impl ReadTracker {
-    const WINDOW_SIZE: usize = 4;
-    const REQUIRED_SPIKES_IN_WINDOW: usize = 2;
-
-    fn new(seed_total_read: u64) -> Self {
+    fn new(seed_total_read: u64, window_size: usize) -> Self {
         Self {
             last_total_read: seed_total_read,
             avg_delta: 0.0,
             alerted_this_burst: false,
-            relative_spike_window: [false; Self::WINDOW_SIZE],
-            absolute_burst_window: [false; Self::WINDOW_SIZE],
+            relative_spike_window: vec![false; window_size.max(1)],
+            absolute_burst_window: vec![false; window_size.max(1)],
             window_pos: 0,
         }
     }
@@ -69,7 +59,7 @@ impl ReadTracker {
     fn record_poll(&mut self, was_relative_spike: bool, was_absolute_burst: bool) {
         self.relative_spike_window[self.window_pos] = was_relative_spike;
         self.absolute_burst_window[self.window_pos] = was_absolute_burst;
-        self.window_pos = (self.window_pos + 1) % Self::WINDOW_SIZE;
+        self.window_pos = (self.window_pos + 1) % self.relative_spike_window.len();
     }
 
     fn relative_spike_count_in_window(&self) -> usize {
@@ -81,22 +71,25 @@ impl ReadTracker {
     }
 }
 
-pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
-    alerts.info(
-        "process",
-        format!(
-            "watching new processes (poll every {}s) for: obfuscated inline payloads, unusual/denied exec paths, masquerading names",
-            cfg.poll_interval_secs
-        ),
-    );
-    alerts.info(
-        "file-read-burst",
-        format!(
-            "watching ALL running processes for mass file-read bursts: {}+ bytes/poll absolute, or {}x+ a process's own recent average",
-            format_bytes(cfg.file_read_burst_absolute_bytes_per_poll),
-            cfg.file_read_burst_relative_multiplier
-        ),
-    );
+pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
+    {
+        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        alerts.info(
+            "process",
+            format!(
+                "watching new processes (poll every {}s) for: obfuscated inline payloads, unusual/denied exec paths, masquerading names",
+                cfg.poll_interval_secs
+            ),
+        );
+        alerts.info(
+            "file-read-burst",
+            format!(
+                "watching ALL running processes for mass file-read bursts: {}+ bytes/poll absolute, or {}x+ a process's own recent average",
+                format_bytes(cfg.file_read_burst_absolute_bytes_per_poll),
+                cfg.file_read_burst_relative_multiplier
+            ),
+        );
+    }
 
     let mut read_trackers: HashMap<Pid, ReadTracker> = HashMap::new();
     let mut warned_unlisted_paths: HashSet<String> = HashSet::new();
@@ -120,6 +113,12 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     };
 
     while running.load(Ordering::Relaxed) {
+        // Cloned once per iteration (a cheap Arc refcount bump), never
+        // cached across iterations -- every cfg.* read below sees a single
+        // consistent snapshot for this whole poll, and a config reload
+        // between iterations takes effect on the very next one with no
+        // further changes needed anywhere in this loop body.
+        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs));
         let sys = System::new_all();
 
@@ -187,7 +186,9 @@ fn check_read_burst(
     #[cfg(not(target_os = "linux"))]
     let total_read = total_read_bytes(pid, p);
 
-    let tracker = trackers.entry(pid).or_insert_with(|| ReadTracker::new(total_read));
+    let tracker = trackers
+        .entry(pid)
+        .or_insert_with(|| ReadTracker::new(total_read, cfg.read_burst_window_size));
 
     // A process's disk_usage() can wrap or reset (e.g. genuinely restarted
     // under the same PID between polls on some platforms) -- treat a
@@ -207,8 +208,8 @@ fn check_read_burst(
         // round's own inter-round pause produced an intervening zero-delta
         // poll that reset the count every time.
         tracker.record_poll(false, false);
-        if tracker.relative_spike_count_in_window() < ReadTracker::REQUIRED_SPIKES_IN_WINDOW
-            && tracker.absolute_burst_count_in_window() < ReadTracker::REQUIRED_SPIKES_IN_WINDOW
+        if tracker.relative_spike_count_in_window() < cfg.read_burst_required_spikes_in_window
+            && tracker.absolute_burst_count_in_window() < cfg.read_burst_required_spikes_in_window
         {
             tracker.alerted_this_burst = false;
         }
@@ -275,9 +276,8 @@ fn check_read_burst(
     let exe_path_raw = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let path_is_corroborating = is_denied_exec_path(&exe_path_raw, &cfg.deny_exec_path_fragments).is_some()
         || is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots);
-    const CORROBORATED_THRESHOLD_FRACTION: f64 = 0.25;
     let effective_absolute_threshold = if path_is_corroborating {
-        ((effective_absolute_threshold as f64) * CORROBORATED_THRESHOLD_FRACTION) as u64
+        ((effective_absolute_threshold as f64) * cfg.read_burst_corroborated_threshold_fraction) as u64
     } else {
         effective_absolute_threshold
     };
@@ -291,9 +291,8 @@ fn check_read_burst(
     // own normal level. A read within a modest multiple of the process's
     // own established baseline is excluded from the absolute-burst check
     // even if it clears the raw threshold.
-    const BASELINE_RELATIVE_TO_ABSOLUTE_EXEMPTION_MULTIPLIER: f64 = 3.0;
     let absolute_reading_is_within_own_established_baseline = tracker.avg_delta > 0.0
-        && (delta as f64) < tracker.avg_delta * BASELINE_RELATIVE_TO_ABSOLUTE_EXEMPTION_MULTIPLIER;
+        && (delta as f64) < tracker.avg_delta * cfg.read_burst_baseline_exemption_multiplier;
 
     let single_poll_absolute_burst = delta >= effective_absolute_threshold
         && !absolute_reading_is_within_own_established_baseline;
@@ -304,7 +303,6 @@ fn check_read_burst(
     // BASELINE_WARM_UP_FLOOR requires the baseline itself to already
     // reflect a meaningful amount of steady-state activity before the
     // relative check even engages, not just "greater than noise."
-    const BASELINE_WARM_UP_FLOOR: f64 = 512.0 * 1024.0;
     // The relative-spike path multiplies a PROCESS'S OWN baseline, which for
     // a trusted (name/vendor-root) tool with a modest established average
     // can demand far less than file_read_burst_uncorroborated_ceiling_bytes
@@ -320,7 +318,7 @@ fn check_read_burst(
     // spike must still clear the same absolute ceiling in raw bytes, not
     // just the multiple of its own baseline.
     let relative_spike_needs_ceiling_check = gets_high_throughput_relaxation && !path_is_corroborating;
-    let single_poll_relative_spike = tracker.avg_delta > BASELINE_WARM_UP_FLOOR
+    let single_poll_relative_spike = tracker.avg_delta > cfg.read_burst_baseline_warm_up_floor_bytes
         && (delta as f64) >= tracker.avg_delta * effective_relative_multiplier
         && (!relative_spike_needs_ceiling_check
             || delta >= cfg.file_read_burst_uncorroborated_ceiling_bytes);
@@ -339,8 +337,8 @@ fn check_read_burst(
     // an intervening quiet poll between rounds) still trips this. The
     // absolute path originally had no persistence requirement at all,
     // completely bypassing this protection -- both paths now require it.
-    let is_relative_spike = tracker.relative_spike_count_in_window() >= ReadTracker::REQUIRED_SPIKES_IN_WINDOW;
-    let is_absolute_burst = tracker.absolute_burst_count_in_window() >= ReadTracker::REQUIRED_SPIKES_IN_WINDOW;
+    let is_relative_spike = tracker.relative_spike_count_in_window() >= cfg.read_burst_required_spikes_in_window;
+    let is_absolute_burst = tracker.absolute_burst_count_in_window() >= cfg.read_burst_required_spikes_in_window;
 
     if (is_absolute_burst || is_relative_spike) && !tracker.alerted_this_burst {
         tracker.alerted_this_burst = true;
@@ -382,12 +380,11 @@ fn check_read_burst(
     // anchored to genuine steady-state activity for as long as the scan
     // itself continues, or a sustained scan becomes progressively HARDER to
     // detect the longer it runs, the opposite of the intended behavior.
-    const EMA_ALPHA: f64 = 0.2;
     if !single_poll_relative_spike && !single_poll_absolute_burst {
         tracker.avg_delta = if tracker.avg_delta == 0.0 {
             delta as f64
         } else {
-            EMA_ALPHA * (delta as f64) + (1.0 - EMA_ALPHA) * tracker.avg_delta
+            cfg.read_burst_ema_alpha * (delta as f64) + (1.0 - cfg.read_burst_ema_alpha) * tracker.avg_delta
         };
     }
 }
@@ -487,7 +484,7 @@ fn inspect_new_process(
         i_lower == name_lower || i_lower == exe_basename_lower
     });
     if is_watched_interp {
-        if let Some(v) = score_command_line(&cmdline) {
+        if let Some(v) = score_command_line(&cmdline, cfg.c2_max_decode_depth) {
             // 200 chars was long enough to show an -EncodedCommand wrapper's
             // own base64 head, but for a PLAIN inline script (`node -e
             // "<source>"`, no encoding at all) it shows nothing past the
@@ -507,7 +504,7 @@ fn inspect_new_process(
             // of guessing at the real structure from a 200-char raw-cmdline
             // prefix, which is what the wrapper's own base64 head shows and
             // is useless for seeing what the command actually does.
-            let decoded_head = decode_encoded_command(&cmdline)
+            let decoded_head = decode_encoded_command(&cmdline, cfg.c2_max_decode_depth)
                 .map(|d| d.chars().take(300).collect::<String>());
             // Severity stays CRITICAL unconditionally -- a c2-shaped command
             // line is a severe signal regardless of who spawned it, since a

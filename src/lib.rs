@@ -1,5 +1,6 @@
 pub mod alert;
 pub mod config;
+pub mod config_reload;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod heuristics;

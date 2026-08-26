@@ -1,10 +1,10 @@
 use clap::Parser;
 use goofedup::alert::AlertSink;
-use goofedup::config::Config;
-use goofedup::{scan_js, watch_file, watch_network, watch_persistence, watch_process};
+use goofedup::config::{dirs_home, override_path, Config, ConfigOverrides, SharedConfig};
+use goofedup::{config_reload, scan_js, watch_file, watch_network, watch_persistence, watch_process};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// goofedup -- cross-platform structural-anomaly watcher.
 ///
@@ -37,26 +37,29 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    let cfg = Arc::new(Config::default_for_platform());
+    let override_file = override_path(&dirs_home());
+    let (initial_cfg, initial_overrides) = config_reload::load_config_with_overrides(&override_file);
 
     if args.show_config {
-        print_config(&cfg);
+        print_config(&initial_cfg, &initial_overrides);
         return;
     }
 
     if let Some(root) = &args.scan_deps {
-        if let Some(parent) = cfg.log_path.parent() {
+        if let Some(parent) = initial_cfg.log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let alerts = AlertSink::new(cfg.log_path.clone());
+        let alerts = AlertSink::new(initial_cfg.log_path.clone());
         let flagged = scan_js::scan_project(root, &alerts);
         std::process::exit(if flagged > 0 { 1 } else { 0 });
     }
 
-    if let Some(parent) = cfg.log_path.parent() {
+    if let Some(parent) = initial_cfg.log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let alerts = Arc::new(AlertSink::new(cfg.log_path.clone()));
+    let alerts = Arc::new(AlertSink::new(initial_cfg.log_path.clone()));
+    let cfg: SharedConfig = Arc::new(RwLock::new(Arc::new(initial_cfg)));
+    let overrides_shared: Arc<RwLock<ConfigOverrides>> = Arc::new(RwLock::new(initial_overrides));
 
     // Alert-triggered response: any Warn/Critical alert naming an app sends
     // the hidden-unicode-identifier content scan over that app's install
@@ -128,6 +131,16 @@ fn main() {
             watch_network::run_firewall_drift(cfg, alerts, running)
         }));
     }
+    {
+        let cfg = cfg.clone();
+        let overrides_shared = overrides_shared.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        let override_file = override_file.clone();
+        handles.push(std::thread::spawn(move || {
+            config_reload::run(cfg, overrides_shared, override_file, alerts, running)
+        }));
+    }
 
     while running.load(Ordering::Relaxed) {
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -145,31 +158,13 @@ fn main() {
     }
 }
 
-fn print_config(cfg: &Config) {
+fn print_config(cfg: &Config, overrides: &ConfigOverrides) {
     println!("goofedup config for {}", std::env::consts::OS);
-    println!("log path: {}", cfg.log_path.display());
-    println!("\nbootstrap watch:");
-    for e in &cfg.bootstrap_watch {
-        println!(
-            "  {} (must contain '{}') > {} bytes",
-            e.search_root.join(e.file_name).display(),
-            e.path_must_contain,
-            e.max_bytes
-        );
+    println!("override file: {}", override_path(&dirs_home()).display());
+    for section in goofedup::config::config_sections(cfg, overrides) {
+        println!("\n{} -- {}", section.title, section.description);
+        for row in section.rows {
+            println!("  {}: {}", row.label, row.value);
+        }
     }
-    println!("\nbackup-sibling roots:");
-    for r in &cfg.backup_sibling_roots {
-        println!("  {}", r.display());
-    }
-    println!("\nwatched interpreters: {}", cfg.watched_interpreters.join(", "));
-    println!("\ndenied exec path fragments: {}", cfg.deny_exec_path_fragments.join(", "));
-    println!("\nallowed exec roots:");
-    for r in &cfg.allowed_exec_roots {
-        println!("  {}", r.display());
-    }
-    println!(
-        "\nnetwork scan thresholds: {}+ distinct ports OR {}+ distinct hosts within {}s",
-        cfg.scan_distinct_ports_threshold, cfg.scan_distinct_hosts_threshold, cfg.scan_window_secs
-    );
-    println!("poll interval: {}s", cfg.poll_interval_secs);
 }

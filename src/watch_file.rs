@@ -3,7 +3,7 @@
 // macOS, inotify on Linux) -- genuinely event-driven, no polling.
 
 use crate::alert::AlertSink;
-use crate::config::Config;
+use crate::config::{Config, SharedConfig};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
 use std::collections::HashMap;
@@ -55,7 +55,23 @@ fn is_cache_staging_path(path: &std::path::Path) -> bool {
     })
 }
 
-pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>) {
+/// `notify::Watcher::watch()` registrations below are one-time setup from
+/// `cfg.bootstrap_watch`/`cfg.backup_sibling_roots`, read once before the
+/// blocking `for res in rx` event loop -- unlike every other watcher's
+/// poll-loop shape, there is no periodic point to re-read a fresh Config
+/// from. A config-file change to WHICH roots are watched therefore still
+/// needs a restart to take effect; only the leaf-function behavior on
+/// already-watched paths (e.g. a bootstrap entry's max_bytes, read fresh
+/// per event via the cfg snapshot taken at startup) is not live-reloadable
+/// here. Re-registering a notify::Watcher on a live root-set change would
+/// need a materially more complex design (tracking the diff between old
+/// and new root sets, re-watching/un-watching individual paths) for a case
+/// that has not come up in practice -- the roots computed by
+/// default_for_platform() rarely change, and adding a wholly new
+/// bootstrap_watch entry via the config file is the one case that would
+/// currently require a restart to start being watched.
+pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>) {
+    let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     // First-seen size per path, for the generic "known-small file just got
     // huge" detector below -- this is the general form of what the explicit
     // bootstrap_watch entries in Config hand-name for specific known apps:
@@ -187,7 +203,7 @@ pub fn check_bootstrap_size(cfg: &Config, alerts: &AlertSink, path: &std::path::
     };
     let path_str = path.to_string_lossy();
     for entry in &cfg.bootstrap_watch {
-        if file_name != entry.file_name || !path_str.contains(entry.path_must_contain) {
+        if file_name != entry.file_name || !path_str.contains(&entry.path_must_contain) {
             continue;
         }
         let Ok(meta) = std::fs::metadata(path) else {

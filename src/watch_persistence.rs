@@ -8,7 +8,7 @@
 // noisy on first run") is what actually triggers an alert.
 
 use crate::alert::AlertSink;
-use crate::config::Config;
+use crate::config::{Config, SharedConfig};
 use crate::heuristics::{is_denied_exec_path, score_command_line};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +22,7 @@ pub struct PersistenceEntry {
     pub command: String,
 }
 
-pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
+pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     alerts.info(
         "persistence",
         "auditing services / scheduled tasks / login items for new or suspicious registrations",
@@ -32,6 +32,7 @@ pub fn run(cfg: Arc<Config>, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     let mut first_pass = true;
 
     while running.load(Ordering::Relaxed) {
+        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let current = enumerate();
         let mut current_map = HashMap::new();
         for entry in current {
@@ -59,7 +60,7 @@ fn inspect_new_entry(cfg: &Config, alerts: &AlertSink, entry: &PersistenceEntry)
     if let Some(reason) = is_denied_exec_path(&entry.command, &cfg.deny_exec_path_fragments) {
         reasons.push(format!("command references a denied path: {reason}"));
     }
-    if let Some(v) = score_command_line(&entry.command) {
+    if let Some(v) = score_command_line(&entry.command, cfg.c2_max_decode_depth) {
         reasons.push(format!(
             "command shaped like obfuscated payload (score={}, {})",
             v.score,
