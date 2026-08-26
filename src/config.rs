@@ -52,6 +52,19 @@ pub struct Config {
     pub file_read_burst_absolute_bytes_per_poll: u64,
     pub file_read_burst_relative_multiplier: f64,
 
+    /// A read this large fires CRITICAL regardless of exe path/name trust --
+    /// no dev tool observed on real hardware has ever legitimately needed
+    /// this much in one poll. Exists because path/name-based trust answers
+    /// "is this a legitimate BINARY," never "is this the actor actually
+    /// running it" (the same principle already applied to c2-shaped-process
+    /// severity) -- a compromise of an otherwise-trusted process could still
+    /// use it to exfiltrate at effectively unbounded volume, so trust must
+    /// have a ceiling it cannot buy past. Calibrated above the highest
+    /// legitimate burst live-witnessed on real dev-workstation hardware
+    /// (claude.exe and powershell.exe both hit 1.2-1.7GB/poll during normal
+    /// heavy operation -- a full codebase read, a large build).
+    pub file_read_burst_uncorroborated_ceiling_bytes: u64,
+
     /// Process names (case-insensitive, matched against sysinfo's reported
     /// process name) that are KNOWN to legitimately sustain high burst reads
     /// as their normal operating shape -- sync/backup/indexer tools and
@@ -190,6 +203,26 @@ impl Config {
                 allowed_exec_roots.push(PathBuf::from(windir.clone()));
                 os_vendor_roots.push(PathBuf::from(windir));
             }
+            // python.org's Windows installer's "Install for all users" option
+            // (an admin-elevation-gated install, same trust tier as Program
+            // Files/WINDIR above) writes directly to the system drive root
+            // as `PythonXX`, not under Program Files -- live-witnessed as
+            // this machine's single largest process-path WARN source (34
+            // occurrences, C:\Python312\python.exe) despite being a
+            // completely standard install location, not an unusual one.
+            // Enumerated by version rather than matched by glob since
+            // is_unlisted_exec_path does exact-prefix matching; covers the
+            // actively-maintained CPython release line plus enough headroom
+            // for this to keep working across ordinary version upgrades
+            // without needing another gap-fill each time.
+            if let Ok(sysdrive) = std::env::var("SystemDrive") {
+                let sysdrive = PathBuf::from(sysdrive);
+                for minor in 8..=14u32 {
+                    let root = sysdrive.join(format!("Python3{minor}"));
+                    allowed_exec_roots.push(root.clone());
+                    os_vendor_roots.push(root);
+                }
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -265,15 +298,26 @@ impl Config {
             // while remaining well below a real scanner's rate.
             scan_distinct_hosts_threshold: 40,
             scan_window_secs: 10,
-            // 50MB read in a single ~3s poll interval is well past what any
-            // normal interactive tool does in that window; a real bulk
-            // build/backup/indexer legitimately sustains high read rates,
-            // which is exactly what the relative-multiplier check below is
-            // for -- this absolute floor exists to catch a fast scanner
-            // even the very first time it's observed, before any baseline
-            // exists to compare against.
-            file_read_burst_absolute_bytes_per_poll: 50 * 1024 * 1024,
+            // Originally 50MB, calibrated against real recorded evidence:
+            // on an actual dev workstation (compilers, package managers,
+            // repo-wide grep, AI coding tools, browsers, archivers all
+            // running normally) this floor alone produced 223 CRITICALs in
+            // one operating log with a true-positive rate of zero -- every
+            // single one traced to ordinary tool activity, never to the
+            // real incident this log also contains (caught by other
+            // detectors entirely). 300MB is still well past a real
+            // interactive tool's one-shot need, but clears the routine
+            // 70-290MB bursts live-witnessed from grep/tar/dllhost/Code/zig
+            // doing their normal job. A real bulk build/backup/indexer
+            // legitimately sustains high read rates, which is exactly what
+            // the relative-multiplier check below is for -- this absolute
+            // floor exists to catch a fast scanner even the very first time
+            // it's observed, before any baseline exists to compare against.
+            file_read_burst_absolute_bytes_per_poll: 300 * 1024 * 1024,
             file_read_burst_relative_multiplier: 8.0,
+            // No trust exemption applies past this -- see the field's own
+            // doc comment.
+            file_read_burst_uncorroborated_ceiling_bytes: 2 * 1024 * 1024 * 1024,
             known_high_throughput_tool_names: vec![
                 "syncthing.exe".to_string(),
                 "syncthing".to_string(),

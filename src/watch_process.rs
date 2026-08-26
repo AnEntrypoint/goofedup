@@ -236,8 +236,17 @@ fn check_read_burst(
             !root_str.is_empty() && exe_path_lower.starts_with(&root_str)
         });
     let gets_high_throughput_relaxation = is_known_high_throughput_tool || runs_from_os_vendor_root;
+    // Trust (name or path) raises the bar but never removes it -- capped at
+    // file_read_burst_uncorroborated_ceiling_bytes regardless of the
+    // multiplier, since trust answers "is this a legitimate BINARY," never
+    // "is this the actor actually running it" (the same principle already
+    // applied to c2-shaped-process severity: see that detector's own
+    // comment on why a known-looking parent never suppresses an alert). A
+    // relaxed floor that could exceed the ceiling would let a sufficiently
+    // trusted-looking process buy unlimited exfiltration headroom.
     let effective_absolute_threshold = if gets_high_throughput_relaxation {
-        (cfg.file_read_burst_absolute_bytes_per_poll as f64 * cfg.known_high_throughput_tool_multiplier) as u64
+        ((cfg.file_read_burst_absolute_bytes_per_poll as f64 * cfg.known_high_throughput_tool_multiplier) as u64)
+            .min(cfg.file_read_burst_uncorroborated_ceiling_bytes)
     } else {
         cfg.file_read_burst_absolute_bytes_per_poll
     };
@@ -250,6 +259,27 @@ fn check_read_burst(
         cfg.file_read_burst_relative_multiplier * cfg.known_high_throughput_tool_multiplier
     } else {
         cfg.file_read_burst_relative_multiplier
+    };
+
+    // Corroboration: a process ALSO running from a denied or unlisted exec
+    // path (reusing the exact same checks the process-path detector itself
+    // applies -- not a new signal, a cross-reference of an existing one) is
+    // far stronger evidence than read volume alone, so it clears the
+    // absolute floor at a fraction of the normal bar. This is the
+    // volume-alone false-positive class's actual fix: 223 CRITICALs in one
+    // operating log, all from well-located, ordinarily-installed dev tools
+    // with no other red flag -- corroboration lets a genuinely suspicious
+    // combination (unusual location AND a large read) still alert well
+    // below the raised floor, while volume by itself must clear the much
+    // higher bar above.
+    let exe_path_raw = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+    let path_is_corroborating = is_denied_exec_path(&exe_path_raw, &cfg.deny_exec_path_fragments).is_some()
+        || is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots);
+    const CORROBORATED_THRESHOLD_FRACTION: f64 = 0.25;
+    let effective_absolute_threshold = if path_is_corroborating {
+        ((effective_absolute_threshold as f64) * CORROBORATED_THRESHOLD_FRACTION) as u64
+    } else {
+        effective_absolute_threshold
     };
 
     // Live-witnessed: a process whose own baseline is already substantial
