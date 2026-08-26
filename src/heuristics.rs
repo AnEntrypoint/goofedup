@@ -16,6 +16,25 @@ fn ip_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap())
 }
 
+/// True for loopback (127.0.0.0/8), RFC 1918 private ranges, and link-local
+/// (169.254.0.0/16) -- an address that can never be a real external C2
+/// endpoint since it never leaves the host/local network, only a local
+/// service a benign tool is legitimately talking to (a dev server, a test
+/// harness's own child process, a local API). Live-witnessed: every
+/// `embedded IP literal` hit in one operating log's recurring
+/// c2-shaped-process false positive was 127.0.0.1 -- a Node automation
+/// one-liner (`node -e "... require('child_process') ..."`) polling its own
+/// local test server, scored identically to a real hardcoded external C2
+/// address (the actual incident this detector exists to catch used
+/// 23.27.13.135, a real routable address, entirely unaffected by this
+/// exemption). General range-based structure, not a literal-address
+/// allowlist -- covers any local-only address, not just the one observed.
+fn is_non_routable_ip(ip: &str) -> bool {
+    let octets: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
+    let [a, b, ..] = octets[..] else { return false };
+    a == 127 || a == 10 || (a == 172 && (16..=31).contains(&b)) || (a == 192 && b == 168) || (a == 169 && b == 254)
+}
+
 fn url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"https?://[^\s'\x22]+").unwrap())
@@ -35,7 +54,18 @@ const OBFUSCATION_MARKERS: &[&str] = &[
     "fromCharCode",
     "atob(",
     "btoa(",
-    "child_process",
+    // child_process deliberately excluded -- unlike every other entry here,
+    // it's a standard Node.js module name that shows up in an enormous
+    // fraction of completely ordinary automation/build tooling (spawning a
+    // subprocess is one of Node's most routine tasks), not a pattern
+    // specifically associated with obfuscation or exfiltration. Live-
+    // witnessed: every c2-shaped-process false positive with this marker
+    // was `node -e "... require('child_process') ..."` from this project's
+    // own dev-automation tooling, never anything with actual malicious
+    // content -- a real attacker's use of it is already caught by the
+    // ACTION it enables (a real IP/URL, a decoded blob, an eval/download
+    // cradle), all scored independently and much more strongly than a
+    // module-name substring match ever should be.
     "createDecipheriv",
     "createCipheriv",
     "XOR",
@@ -302,7 +332,7 @@ pub fn score_command_line(cmdline: &str) -> Option<Verdict> {
         reasons.push(format!("long command line ({} chars)", cmdline.len()));
     }
 
-    if let Some(m) = ip_re().find(scored) {
+    if let Some(m) = ip_re().find_iter(scored).find(|m| !is_non_routable_ip(m.as_str())) {
         score += 2;
         reasons.push(format!("embedded IP literal ({})", m.as_str()));
         has_strong_signal = true;

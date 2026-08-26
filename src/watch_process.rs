@@ -305,8 +305,25 @@ fn check_read_burst(
     // reflect a meaningful amount of steady-state activity before the
     // relative check even engages, not just "greater than noise."
     const BASELINE_WARM_UP_FLOOR: f64 = 512.0 * 1024.0;
+    // The relative-spike path multiplies a PROCESS'S OWN baseline, which for
+    // a trusted (name/vendor-root) tool with a modest established average
+    // can demand far less than file_read_burst_uncorroborated_ceiling_bytes
+    // to trip -- live-witnessed: grep.exe (Program Files\Git, vendor-root
+    // trusted) at a 1.1MB baseline only needed 128x (8x base * 16x
+    // relaxation) = ~141MB to fire, and a real grep run over a sizeable repo
+    // clears that trivially (484MB observed) while still being nowhere near
+    // genuinely extreme. The absolute path's own uncorroborated-ceiling cap
+    // (see effective_absolute_threshold above) closes exactly this gap for
+    // raw volume; the relative path needs the identical cap, or trust that
+    // survives the absolute fix remains fully exploitable through the
+    // multiplier math alone. An uncorroborated trusted process's relative
+    // spike must still clear the same absolute ceiling in raw bytes, not
+    // just the multiple of its own baseline.
+    let relative_spike_needs_ceiling_check = gets_high_throughput_relaxation && !path_is_corroborating;
     let single_poll_relative_spike = tracker.avg_delta > BASELINE_WARM_UP_FLOOR
-        && (delta as f64) >= tracker.avg_delta * effective_relative_multiplier;
+        && (delta as f64) >= tracker.avg_delta * effective_relative_multiplier
+        && (!relative_spike_needs_ceiling_check
+            || delta >= cfg.file_read_burst_uncorroborated_ceiling_bytes);
 
     tracker.record_poll(single_poll_relative_spike, single_poll_absolute_burst);
 
