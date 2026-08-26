@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "goofedup"
-version = "0.1.40"
+version = "0.1.41"
 dependencies = [
  "chrono",
  "clap",
