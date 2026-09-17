@@ -2,3 +2,5 @@
 /.gm
 /.agentplug-kv
 sh.exe.stackdump
+config.bat
+node_modules
