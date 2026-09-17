@@ -34,6 +34,34 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
     while running.load(Ordering::Relaxed) {
         let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let current = enumerate();
+
+        // A transient PowerShell/WMI hiccup (timeout, busy system, etc.)
+        // makes enumerate() silently return a near-empty list -- with no
+        // guard, that collapses `known` down to almost nothing, and the
+        // NEXT successful poll then sees every real, pre-existing service
+        // as "new" simultaneously and floods hundreds of false positives.
+        // Live-witnessed: 2026-09-02, ~230 entirely ordinary services
+        // (Steam, VBox, WSL, Windows core services, ...) all fired as
+        // "new service registered" in one poll with no intervening
+        // baseline-capture log, meaning one bad poll wiped the baseline.
+        // A real, non-transient drop in the machine's own persistence
+        // surface (services actually uninstalled) is rare and never this
+        // drastic, so treating a big shrink as a failed poll and skipping
+        // the diff (keeping the last-known-good baseline) is safe.
+        if !first_pass && !known.is_empty() && current.len() * 2 < known.len() {
+            alerts.warn(
+                "persistence",
+                format!(
+                    "skipping this persistence poll: enumerated only {} entries vs {} in the last baseline -- likely a transient enumeration failure, not a real mass-uninstall",
+                    current.len(),
+                    known.len()
+                ),
+                String::new(),
+            );
+            std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs * 10));
+            continue;
+        }
+
         let mut current_map = HashMap::new();
         for entry in current {
             if !first_pass && !known.contains_key(&entry) {

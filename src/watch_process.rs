@@ -520,22 +520,33 @@ fn inspect_new_process(
             // the same as a trusted actor, and the alert must never be
             // quieter for a payload that merely looks like it came from a
             // familiar process.
-            let parent_is_known_automation = ancestor_names(sys, p, ANCESTOR_WALK_MAX_DEPTH)
-                .iter()
-                .any(|ancestor| {
-                    let ancestor_lower = ancestor.to_lowercase();
-                    cfg.known_automation_parent_names.iter().any(|n| n.to_lowercase() == ancestor_lower)
-                });
+            let ancestors = ancestor_names(sys, p, ANCESTOR_WALK_MAX_DEPTH);
+            let parent_is_known_automation = ancestors.iter().any(|ancestor| {
+                let ancestor_lower = ancestor.to_lowercase();
+                cfg.known_automation_parent_names.iter().any(|n| n.to_lowercase() == ancestor_lower)
+            });
             let parent_note = if parent_is_known_automation {
                 "parent=recognized-dev-tool-ancestor"
             } else {
                 "parent=unrecognized"
             };
+            // Full ancestor chain (immediate parent first), not just the
+            // known/unrecognized verdict -- live-witnessed gap: with only
+            // the verdict recorded, a real C2 hit's actual triggering
+            // process (what launched the node -e payload) was unrecoverable
+            // from the alert log after the ephemeral payload process itself
+            // had already exited, making the reinfection vector impossible
+            // to trace after the fact.
+            let ancestor_chain = if ancestors.is_empty() {
+                String::new()
+            } else {
+                format!(" ancestor_chain=[{}]", ancestors.join(" <- "))
+            };
             let decoded_note = decoded_head
                 .map(|d| format!(" decoded_head={d}"))
                 .unwrap_or_default();
             let evidence = format!(
-                "score={} reasons=[{}] {parent_note} cmdline_head={head}{decoded_note}",
+                "score={} reasons=[{}] {parent_note}{ancestor_chain} cmdline_head={head}{decoded_note}",
                 v.score,
                 v.reasons.join("; ")
             );

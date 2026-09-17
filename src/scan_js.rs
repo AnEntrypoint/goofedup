@@ -7,7 +7,7 @@
 // watching.
 
 use crate::alert::{Alert, AlertSink};
-use crate::heuristics::find_hidden_unicode_escape_run;
+use crate::heuristics::{find_config_payload_disproportion, find_hidden_unicode_escape_run};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,18 @@ const SKIP_DIR_NAMES: &[&str] = &[".git", ".hg", ".svn"];
 
 fn is_js_file(path: &Path) -> bool {
     ext_is(path, JS_EXTENSIONS)
+}
+
+/// True for a filename shaped like a build/tooling config file (the
+/// HiddenSpawn family's delivery vehicle -- see
+/// heuristics::find_config_payload_disproportion). Matched on filename
+/// suffix so vite.config.js, webpack.config.mjs, next.config.ts etc. all
+/// match without enumerating every tool name.
+fn is_config_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.contains(".config."))
+        .unwrap_or(false)
 }
 
 fn ext_is(path: &Path, exts: &[&str]) -> bool {
@@ -179,6 +191,19 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
                 ),
                 v.reasons.join("; "),
             );
+        }
+        if is_config_file(path) {
+            if let Some(v) = find_config_payload_disproportion(&content) {
+                total_flagged += 1;
+                alerts.critical(
+                    "config-payload-disproportion",
+                    format!(
+                        "'{}' is a build/config file with a byte-size-to-line-count disproportion consistent with an appended hidden payload (HiddenSpawn-family supply-chain malware pattern)",
+                        path.display()
+                    ),
+                    v.reasons.join("; "),
+                );
+            }
         }
     }
 

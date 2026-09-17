@@ -462,6 +462,7 @@ mod unix_impl {
         Some((ip.to_string(), port))
     }
 
+    #[cfg(target_os = "macos")]
     fn split_host_port(s: &str) -> Option<(String, u16)> {
         let idx = s.rfind(':')?;
         let ip = s[..idx].to_string();

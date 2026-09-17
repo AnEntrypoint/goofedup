@@ -506,6 +506,65 @@ pub fn find_hidden_unicode_escape_run(s: &str) -> Option<Verdict> {
     })
 }
 
+/// Byte-size threshold above which a "small config file" is suspiciously
+/// large -- part of the HiddenSpawn-family structural tell (see
+/// find_config_payload_disproportion doc).
+const CONFIG_PAYLOAD_MIN_BYTES: usize = 3000;
+
+/// Line-count ceiling below which a file of CONFIG_PAYLOAD_MIN_BYTES+ is
+/// suspiciously few lines for its size.
+const CONFIG_PAYLOAD_MAX_LINES: usize = 50;
+
+/// Literal runtime markers seen in the HiddenSpawn supply-chain malware
+/// family (obfuscator.io-style dispatch, on-chain C2 resolution, detached
+/// respawn persistence). Narrow and specific on purpose -- unlike
+/// OBFUSCATION_MARKERS above, these are exact strings unlikely to appear in
+/// any legitimate code, so a hit here is treated as much stronger evidence
+/// than a generic obfuscation marker. Cheap plain-substring search, no
+/// regex, since none of these need pattern matching.
+const HIDDEN_SPAWN_MARKERS: &[&str] = &[
+    "global['_t_s']",
+    "global._t_s",
+    "_0x1706(",
+    "x-payload-",
+    "createGunzip",
+];
+
+/// Structural tell for the HiddenSpawn supply-chain malware family: a
+/// build/config file (vite.config.js, webpack.config.js, etc. -- normally a
+/// handful of lines) whose actual byte size is disproportionate to its line
+/// count. The payload is appended as ONE extremely long whitespace-padded
+/// line after the real end of the file -- invisible in a normal editor or
+/// diff view unless file size is checked, since line-based tools never
+/// render or highlight the tail of a single enormous line. Survives the
+/// literal C2 address/wallet/obfuscation-function-name changing in each new
+/// variant, unlike a pure signature grep. Combined here with a check for the
+/// family's known runtime markers (HIDDEN_SPAWN_MARKERS) as corroborating
+/// (not required) evidence -- the size/line disproportion alone is already
+/// sufficient to flag, since no legitimate small config file has this shape.
+pub fn find_config_payload_disproportion(content: &str) -> Option<Verdict> {
+    let bytes = content.len();
+    if bytes < CONFIG_PAYLOAD_MIN_BYTES {
+        return None;
+    }
+    let lines = content.lines().count().max(1);
+    if lines > CONFIG_PAYLOAD_MAX_LINES {
+        return None;
+    }
+
+    let mut reasons = vec![format!(
+        "{bytes} bytes across only {lines} line(s) -- a build/config file this size normally has far more lines; a payload appended as one long padded line is invisible in normal diffs/editors"
+    )];
+    let mut score = 6;
+    for marker in HIDDEN_SPAWN_MARKERS {
+        if content.contains(marker) {
+            reasons.push(format!("contains known HiddenSpawn-family runtime marker \"{marker}\""));
+            score += 4;
+        }
+    }
+    Some(Verdict { score, reasons })
+}
+
 /// True if `exe_path` sits under any deny fragment (e.g. Recycle Bin, Trash)
 /// -- an instant, unconditional flag regardless of process name.
 pub fn is_denied_exec_path(exe_path: &str, deny_fragments: &[String]) -> Option<&'static str> {
