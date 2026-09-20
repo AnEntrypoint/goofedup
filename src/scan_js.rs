@@ -7,7 +7,10 @@
 // watching.
 
 use crate::alert::{Alert, AlertSink};
-use crate::heuristics::{find_config_payload_disproportion, find_hidden_unicode_escape_run};
+use crate::heuristics::{
+    find_appended_packed_payload, find_config_payload_disproportion,
+    find_hidden_unicode_escape_run, find_javascript_masquerading_as_asset,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -16,12 +19,19 @@ use walkdir::WalkDir;
 
 const JS_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "tsx"];
 
+/// Asset extensions a real font/image uses. The 2026-09 HiddenSpawn wave
+/// stuffed a packed IIFE into `fa-solid-400.woff2` (magic `glob` / ASCII
+/// `global['!']` instead of woff2). A JS-only walk never opens these.
+const ASSET_EXTENSIONS: &[&str] = &[
+    "woff", "woff2", "ttf", "otf", "eot", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp",
+];
+
 /// Directory names never worth descending into for this scan: version
 /// control internals (never shipped/executed), and common noise dirs whose
 /// content is either not JS or is test/doc fixture data rather than a real
 /// execution path -- kept narrow and named so a truly novel malicious
 /// package under an unusual dir name is never silently skipped.
-const SKIP_DIR_NAMES: &[&str] = &[".git", ".hg", ".svn"];
+const SKIP_DIR_NAMES: &[&str] = &[".git", ".hg", ".svn", "target"];
 
 fn is_js_file(path: &Path) -> bool {
     ext_is(path, JS_EXTENSIONS)
@@ -174,6 +184,24 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
             total_flagged += flagged;
             continue;
         }
+        if ext_is(path, ASSET_EXTENSIONS) {
+            let Ok(bytes) = std::fs::read(path) else {
+                continue;
+            };
+            total_scanned += 1;
+            if let Some(v) = find_javascript_masquerading_as_asset(&bytes) {
+                total_flagged += 1;
+                alerts.critical(
+                    "js-masquerading-as-asset",
+                    format!(
+                        "'{}' claims a font/image extension but its first bytes are JavaScript -- HiddenSpawn-family delivery vehicle (real woff2/ttf/png never start this way)",
+                        path.display()
+                    ),
+                    v.reasons.join("; "),
+                );
+            }
+            continue;
+        }
         if !is_js_file(path) {
             continue;
         }
@@ -204,6 +232,17 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
                     v.reasons.join("; "),
                 );
             }
+        }
+        if let Some(v) = find_appended_packed_payload(&content) {
+            total_flagged += 1;
+            alerts.critical(
+                "appended-packed-payload",
+                format!(
+                    "'{}' contains a multi-kilobyte packed obfuscator.io IIFE on one line -- HiddenSpawn-family append that line-based diffs never show",
+                    path.display()
+                ),
+                v.reasons.join("; "),
+            );
         }
     }
 

@@ -3,7 +3,6 @@ name: CI
 on:
   pull_request:
   push:
-    branches-ignore: [main]
 
 jobs:
   test:
@@ -20,3 +19,26 @@ jobs:
       - if: matrix.os == 'windows-latest'
         run: cargo build --release --features gui --bin goofedup-gui
       - run: cargo check --release --all-targets
+      - name: scan-deps self (must be clean)
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then EXE=target/release/goofedup.exe; else EXE=target/release/goofedup; fi
+          if ! "$EXE" --scan-deps .; then
+            echo "::error::goofedup --scan-deps flagged its own tree; the early-warning scanner is dirty"
+            exit 1
+          fi
+      - name: scan-deps planted HiddenSpawn shapes (must flag)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, tempfile, subprocess, sys, pathlib
+          root = pathlib.Path(tempfile.mkdtemp(prefix="goofedup-hs-"))
+          tail = "global['!']='fixture';var _0x=(" + "function(){}" + ("a" * 3500) + ");"
+          (root / "index.js").write_text("module.exports = 1;\n" + tail + "\n", encoding="utf-8")
+          (root / "fa-solid-400.woff2").write_bytes(b"global['!']='fixture';var _0x=function(){};" + (b"a" * 64))
+          exe = "target/release/goofedup.exe" if os.name == "nt" else "target/release/goofedup"
+          p = subprocess.run([exe, "--scan-deps", str(root)])
+          if p.returncode == 0:
+              sys.exit("planted HiddenSpawn shapes were NOT flagged -- detector is blind")
+          print("planted shapes flagged (exit %s)" % p.returncode)
+          PY

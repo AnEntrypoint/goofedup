@@ -27,10 +27,11 @@ struct Args {
     show_config: bool,
 
     /// One-shot scan of a project directory (including node_modules) for
-    /// JS-family source hiding identifiers behind a run of 4+ \uXXXX
-    /// escapes -- the shape malware uses to dodge a plain-text grep for
-    /// require/child_process/eval/etc. Exits with a non-zero status if
-    /// anything was flagged, so it composes with CI/pre-commit tooling.
+    /// HiddenSpawn-family shapes: 4+ \uXXXX identifier escapes, a
+    /// multi-kilobyte packed IIFE appended as the last line of any JS-family
+    /// file (not just *.config.*), and font/image bytes whose magic is
+    /// JavaScript (the fa-solid-400.woff2 delivery vehicle). Exits non-zero
+    /// if anything was flagged, so it composes with CI/pre-commit tooling.
     #[arg(long, value_name = "PATH")]
     scan_deps: Option<PathBuf>,
 }

@@ -528,6 +528,11 @@ const HIDDEN_SPAWN_MARKERS: &[&str] = &[
     "_0x1706(",
     "x-payload-",
     "createGunzip",
+    // 2026-09 AnEntrypoint incident: the packer stamps a one-character
+    // global bang-key then a 30k+ obfuscator.io IIFE. The campaign id
+    // after the bang changes; the `global['!']` assignment does not.
+    "global['!']",
+    "global[\"!\"]",
 ];
 
 /// Structural tell for the HiddenSpawn supply-chain malware family: a
@@ -560,6 +565,104 @@ pub fn find_config_payload_disproportion(content: &str) -> Option<Verdict> {
         if content.contains(marker) {
             reasons.push(format!("contains known HiddenSpawn-family runtime marker \"{marker}\""));
             score += 4;
+        }
+    }
+    Some(Verdict { score, reasons })
+}
+
+/// Minimum last-line length for an appended packed IIFE. Real source does
+/// not end on a single 3k+ character line of `_0x` dispatcher soup; the
+/// HiddenSpawn family pads the payload onto the last line so line-based
+/// diffs and editors never show it. Independent of whether the file is a
+/// `*.config.*` (the 2026-09 wave appended to `index.js` / `flatspace.config.mjs`
+/// as well as to vite-style configs).
+const APPENDED_PACKED_MIN_TAIL_BYTES: usize = 3000;
+
+/// True when `line` looks like an obfuscator.io-style packed IIFE rather
+/// than a minified-but-legitimate bundle: a `global['!']` stamp, or a
+/// `var _0x…=(function(` dispatcher occupying the whole tail.
+fn line_looks_like_packed_iife(line: &str) -> bool {
+    if line.contains("global['!']") || line.contains("global[\"!\"]") {
+        return true;
+    }
+    line.contains("var _0x") && (line.contains("(function(") || line.contains("(function ("))
+}
+
+/// Packed payload on ANY JS-family file, not just `*.config.*`.
+/// The config-file disproportion check above misses `index.js` because that
+/// file already has hundreds of real lines. Live 2026-09 acptoapi: the
+/// 39k-byte IIFE sat on line 224 with a trailing `}` after it, so "last
+/// line only" is blind. Any single line over APPENDED_PACKED_MIN_TAIL_BYTES
+/// that looks like a packed IIFE is the tell.
+pub fn find_appended_packed_payload(content: &str) -> Option<Verdict> {
+    let (idx, line) = content
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.len() >= APPENDED_PACKED_MIN_TAIL_BYTES && line_looks_like_packed_iife(l))
+        .max_by_key(|(_, l)| l.len())?;
+    let mut reasons = vec![format!(
+        "line {} is {} bytes of packed obfuscator.io-style IIFE -- HiddenSpawn-family append; invisible to line-based diffs",
+        idx + 1,
+        line.len()
+    )];
+    let mut score = 8;
+    for marker in HIDDEN_SPAWN_MARKERS {
+        if line.contains(marker) {
+            reasons.push(format!("contains known HiddenSpawn-family runtime marker \"{marker}\""));
+            score += 4;
+        }
+    }
+    Some(Verdict { score, reasons })
+}
+
+/// Font/image magic that a real asset of that extension always starts with.
+/// JS stuffed into `fa-solid-400.woff2` starts with ASCII `global[` / `var `
+/// instead -- the 2026-09 wave's second delivery vehicle, which a JS-only
+/// walk never opens because the extension is not JS.
+fn skip_utf8_bom_and_ws(data: &[u8]) -> &[u8] {
+    let data = if data.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &data[3..]
+    } else {
+        data
+    };
+    let n = data.iter().take_while(|b| matches!(*b, b' ' | b'\t' | b'\n' | b'\r')).count();
+    &data[n..]
+}
+
+fn bytes_look_like_javascript(data: &[u8]) -> bool {
+    let data = skip_utf8_bom_and_ws(data);
+    const PREFIXES: [&[u8]; 6] = [
+        b"global[",
+        b"global.",
+        b"var _0x",
+        b"(function(",
+        b"(function (",
+        b"/*! For license information",
+    ];
+    PREFIXES.iter().any(|p| data.starts_with(p))
+}
+
+/// A file whose extension claims to be a font/image but whose first bytes
+/// are JavaScript. Shape, not a filename denylist: any `*.woff2` that
+/// begins `global['!']` is the same tell whether or not it is named
+/// `fa-solid-400`.
+pub fn find_javascript_masquerading_as_asset(data: &[u8]) -> Option<Verdict> {
+    if data.len() < 32 || !bytes_look_like_javascript(data) {
+        return None;
+    }
+    let head = skip_utf8_bom_and_ws(data);
+    let preview_len = head.len().min(48);
+    let preview = String::from_utf8_lossy(&head[..preview_len]);
+    let mut reasons = vec![format!(
+        "asset/font/image bytes begin as JavaScript ({preview:?}) -- real woff2/ttf/png never start this way"
+    )];
+    let mut score = 9;
+    if let Ok(text) = std::str::from_utf8(data) {
+        for marker in HIDDEN_SPAWN_MARKERS {
+            if text.contains(marker) {
+                reasons.push(format!("contains known HiddenSpawn-family runtime marker \"{marker}\""));
+                score += 4;
+            }
         }
     }
     Some(Verdict { score, reasons })

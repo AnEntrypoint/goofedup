@@ -22,6 +22,7 @@ All watchers run concurrently, are **alert-only** (nothing is ever killed, delet
 - **Network scanning** — a process opening connections to an unusual number of distinct ports or hosts in a short window.
 - **Firewall silently going dark** — a common malware self-defense move.
 - **Alert-triggered content audit** — when any Warn/Critical alert names an app, its install tree is automatically scanned (including inside Electron `.asar` archives) for `\uXXXX`-hidden ASCII identifiers; alerts naming a high-value target (Discord, Adobe, Slack, Teams) widen the scan to that product's whole tree.
+- **One-shot `--scan-deps PATH`** — walks JS-family source plus font/image assets and exits non-zero on HiddenSpawn-family shapes: a multi-kilobyte packed `var _0x…=(function(` IIFE on any line (not just `*.config.*`, not just the last line — live 2026-09 `index.js` sat the 39k-byte IIFE on line 224), and a `*.woff2`/`*.ttf`/`*.png` whose first bytes are JavaScript (`global['!']` instead of real font magic). Planted in CI so a blind detector fails the build before it ships.
 
 ## Known false-positive classes (read this before you panic)
 
