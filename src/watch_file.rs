@@ -4,19 +4,13 @@
 
 use crate::alert::AlertSink;
 use crate::config::{Config, SharedConfig};
+use crate::heuristics::is_backup_sibling_name;
 use notify::{Event, EventKind, RecursiveMode, Watcher};
-use regex::Regex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::OnceLock;
-
-fn backup_suffix_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\.(orig|bak|inz|original|old)(\.[A-Za-z0-9]+)?$").unwrap())
-}
 
 /// Script-file extensions worth baselining. Not tied to any one app/runtime
 /// -- covers the interpreted-language entry-point shape a "small bootstrap
@@ -226,7 +220,7 @@ pub fn check_backup_sibling(_cfg: &Config, alerts: &AlertSink, path: &std::path:
     let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
         return;
     };
-    if backup_suffix_re().is_match(file_name) {
+    if is_backup_sibling_name(file_name) {
         alerts.critical(
             "backup-sibling",
             "a *.orig/*.bak/*.inz-style backup file appeared -- this is exactly the shape an infector leaves behind to preserve the original while it replaces the real file",

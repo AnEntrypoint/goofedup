@@ -10,7 +10,10 @@ use goofedup::alert::{Alert, AlertSink, Level};
 use goofedup::config::{dirs_home, override_path, ConfigOverrides, SharedConfig};
 use goofedup::gui::icon::IconState;
 use goofedup::gui::{alert_window, autostart, history::History, icon, single_instance, toast};
-use goofedup::{config_reload, scan_js, watch_file, watch_network, watch_persistence, watch_process};
+use goofedup::{
+    config_reload, correlate, electron_sweep, scan_js, watch_file, watch_network, watch_persistence,
+    watch_process,
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -108,6 +111,38 @@ fn main() {
         alerts.add_on_alert(move |a| {
             response.on_alert(a, &alerts_for_response);
         });
+    }
+
+    // Cross-detector correlation: a c2-shaped-process alert and a
+    // backup-sibling/bootstrap-size alert firing within ~60s of each other
+    // are almost certainly the same real compromise -- emit one combined
+    // CONFIRMED-COMPROMISE alert instead of leaving correlation as an
+    // exercise for whoever reads the log later.
+    let correlator = Arc::new(correlate::Correlator::new());
+    {
+        let correlator = correlator.clone();
+        let alerts_for_correlate = alerts.clone();
+        alerts.add_on_alert(move |a| {
+            correlator.on_alert(a, &alerts_for_correlate);
+        });
+    }
+
+    // Live-witnessed coverage gap: this GUI had no autostart configured by
+    // default, so the watcher simply wasn't running at all for 2 of 4 known
+    // incident timestamps (2026-08-11, 2026-09-19). Enable "Start with
+    // Windows" automatically the very first time this runs -- still fully
+    // user-togglable afterward via the tray menu below, never re-forced on
+    // a later run.
+    if is_first_run {
+        let enabled = autostart::enable();
+        alerts.info(
+            "goofedup-gui",
+            if enabled {
+                "first run: enabled 'Start with Windows' automatically so the watcher can't silently go dark between sessions again -- toggle it off in the tray menu any time"
+            } else {
+                "first run: could not enable 'Start with Windows' automatically (registry write to HKCU Run failed) -- enable it manually from the tray menu"
+            },
+        );
     }
 
     let running = Arc::new(AtomicBool::new(true));
@@ -376,5 +411,11 @@ fn spawn_watchers(
         let alerts = alerts.clone();
         let running = running.clone();
         std::thread::spawn(move || config_reload::run(cfg, overrides_shared, override_file, alerts, running));
+    }
+    {
+        let cfg = cfg.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        std::thread::spawn(move || electron_sweep::run(cfg, alerts, running));
     }
 }

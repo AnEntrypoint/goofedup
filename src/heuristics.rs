@@ -668,6 +668,56 @@ pub fn find_javascript_masquerading_as_asset(data: &[u8]) -> Option<Verdict> {
     Some(Verdict { score, reasons })
 }
 
+fn backup_suffix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?i)\.(orig|bak|inz|original|old)(\.[A-Za-z0-9]+)?$").unwrap())
+}
+
+/// True for a filename shaped like an infector's own preserved-backup
+/// sibling (*.orig, *.bak, *.inz, *.original, *.old, optionally with one
+/// more trailing extension e.g. *.inz.orig) -- the exact shape a
+/// bootstrap-hijack leaves behind to keep the original around while it
+/// overwrites the real entry point. Single source of truth shared by the
+/// live file watcher (watch_file::check_backup_sibling), the proactive
+/// Electron/VSCode-family sweep (electron_sweep), and the one-shot
+/// remediation pairing (scan_js::find_remediation_candidates) so all three
+/// agree on exactly one definition of "backup-sibling-shaped" instead of
+/// three independently-maintained regexes silently drifting apart.
+pub fn is_backup_sibling_name(file_name: &str) -> bool {
+    backup_suffix_re().is_match(file_name)
+}
+
+/// Backup-marker suffixes recognized by `is_backup_sibling_name` above,
+/// listed individually (not derived from that regex) so
+/// `strip_backup_markers` can peel them off one layer at a time.
+const BACKUP_MARKER_SUFFIXES: &[&str] = &[".orig", ".bak", ".original", ".old", ".inz"];
+
+/// Strips trailing backup-marker suffixes from a filename, one layer at a
+/// time, to recover the live file it is a preserved copy of: turns
+/// "index.js.orig" into "index.js", and a doubled marker like
+/// "index.js.inz.orig" into "index.js" too. A name with NO recognized
+/// marker suffix at the very end -- e.g. a real payload filename like
+/// "index.inz.cjs", which ends in ".cjs", not one of these markers -- is
+/// returned completely unchanged, so it is deliberately never mistaken for
+/// a preserved-original candidate just because "inz" appears in it
+/// somewhere. Live-witnessed incident shape: the 2026-09 Antigravity/
+/// Discord compromise both preserved the real bootstrap file under a
+/// `.orig`-style sibling while separately dropping its own payload under an
+/// unrelated `*.inz.cjs`-shaped name -- this function must tell those two
+/// apart by suffix shape alone, since both can be present in the same
+/// directory at once.
+pub fn strip_backup_markers(name: &str) -> String {
+    let mut current = name.to_string();
+    loop {
+        let lower = current.to_lowercase();
+        let hit = BACKUP_MARKER_SUFFIXES.iter().find(|marker| lower.ends_with(**marker));
+        let Some(marker) = hit else { break };
+        let new_len = current.len() - marker.len();
+        current.truncate(new_len);
+    }
+    current
+}
+
 /// True if `exe_path` sits under any deny fragment (e.g. Recycle Bin, Trash)
 /// -- an instant, unconditional flag regardless of process name.
 pub fn is_denied_exec_path(exe_path: &str, deny_fragments: &[String]) -> Option<&'static str> {

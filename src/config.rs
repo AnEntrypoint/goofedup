@@ -202,6 +202,32 @@ pub struct Config {
     /// not because any real legitimate or malicious sample observed so far
     /// has needed more than a couple of layers.
     pub c2_max_decode_depth: u32,
+
+    /// Whether the proactive Electron/VSCode-family sweep (electron_sweep.rs)
+    /// runs at all. Born from a live-witnessed 5+ week miss: the Antigravity
+    /// IDE compromise (a VSCode-fork, not Discord/Adobe/Slack/Teams) sat
+    /// undetected because nothing proactively looked at it -- the
+    /// alert-response widening in scan_js.rs only engages AFTER some other
+    /// alert already names an app. This sweep auto-discovers Electron/
+    /// VSCode-family installs by SHAPE (app.asar / @vscode module tree /
+    /// electron binary) instead of a hardcoded name list, so a novel target
+    /// like this one is covered from the start, not just after a miss is
+    /// noticed by hand.
+    pub electron_sweep_enabled: bool,
+    /// How often the sweep re-scans every discovered install (seconds).
+    /// Deliberately much slower than poll_interval_secs -- this is a
+    /// full-content HiddenSpawn scan plus a whole-tree existing-file
+    /// backup-sibling walk, not a lightweight per-event check, so it must
+    /// stay cheap enough to run indefinitely in the background. Default is
+    /// hourly, matching the task's own "once per hour" cadence.
+    pub electron_sweep_interval_secs: u64,
+    /// Root directories to search (recursively, bounded depth) for
+    /// Electron/VSCode-family app installs. Computed per-platform in
+    /// `default_for_platform` -- typically the per-user "Programs" install
+    /// tree (e.g. `%LOCALAPPDATA%\Programs` on Windows), since that's where
+    /// a non-admin install of an app like Antigravity/Cursor/VS Code lands
+    /// without ever touching Program Files.
+    pub electron_sweep_roots: Vec<PathBuf>,
 }
 
 pub struct BootstrapEntry {
@@ -251,6 +277,9 @@ pub struct ConfigOverrides {
     pub read_burst_baseline_warm_up_floor_bytes: Option<f64>,
     pub read_burst_ema_alpha: Option<f64>,
     pub c2_max_decode_depth: Option<u32>,
+    pub electron_sweep_enabled: Option<bool>,
+    pub electron_sweep_interval_secs: Option<u64>,
+    pub electron_sweep_roots: Option<Vec<PathBuf>>,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +375,15 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     }
     if let Some(v) = o.c2_max_decode_depth {
         base.c2_max_decode_depth = v;
+    }
+    if let Some(v) = o.electron_sweep_enabled {
+        base.electron_sweep_enabled = v;
+    }
+    if let Some(v) = o.electron_sweep_interval_secs {
+        base.electron_sweep_interval_secs = v;
+    }
+    if let Some(v) = &o.electron_sweep_roots {
+        base.electron_sweep_roots = v.clone();
     }
     base
 }
@@ -578,6 +616,27 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
                 value: marked(cfg.c2_max_decode_depth.to_string(), overrides.c2_max_decode_depth.is_some()),
             }],
         },
+        ConfigSection {
+            title: "Electron/VSCode-Family Sweep",
+            description: "Periodic proactive scan of every Electron/VSCode-family app install discovered by SHAPE (app.asar / @vscode module tree / electron binary), not a hardcoded name list -- runs the same HiddenSpawn content scan plus an existing-file backup-sibling walk over each one on this cadence.",
+            rows: {
+                let mut rows = vec![
+                    ConfigRow {
+                        label: "Enabled".to_string(),
+                        value: marked(cfg.electron_sweep_enabled.to_string(), overrides.electron_sweep_enabled.is_some()),
+                    },
+                    ConfigRow {
+                        label: "Interval".to_string(),
+                        value: marked(format!("{}s", cfg.electron_sweep_interval_secs), overrides.electron_sweep_interval_secs.is_some()),
+                    },
+                ];
+                rows.extend(cfg.electron_sweep_roots.iter().enumerate().map(|(i, r)| ConfigRow {
+                    label: format!("Root {}", i + 1),
+                    value: marked(r.display().to_string(), overrides.electron_sweep_roots.is_some()),
+                }));
+                rows
+            },
+        },
     ]
 }
 
@@ -614,6 +673,11 @@ impl Config {
         // expect bulk I/O to be safe, since a compromise can write there
         // freely.
         let mut os_vendor_roots = Vec::new();
+        // Roots the proactive Electron/VSCode-family sweep (electron_sweep.rs)
+        // walks looking for an app install by SHAPE, not name -- see that
+        // field's own doc comment for why this exists at all (the
+        // Antigravity IDE miss).
+        let mut electron_sweep_roots = Vec::new();
 
         #[cfg(target_os = "windows")]
         {
@@ -629,6 +693,10 @@ impl Config {
                 backup_sibling_roots.push(local.join("npm-cache"));
                 allowed_exec_roots.push(local.clone());
                 allowed_exec_roots.push(local.join("Microsoft"));
+                // Per-user, no-admin-required app install tree -- where a
+                // VSCode-fork IDE (Antigravity, Cursor, ...) or any other
+                // Electron app installed "for me only" actually lands.
+                electron_sweep_roots.push(local.join("Programs"));
             }
             if let Ok(appdata) = std::env::var("APPDATA") {
                 let appdata = PathBuf::from(appdata);
@@ -691,6 +759,7 @@ impl Config {
         #[cfg(target_os = "macos")]
         {
             backup_sibling_roots.push(home.join("Library/Application Support"));
+            electron_sweep_roots.push(PathBuf::from("/Applications"));
             allowed_exec_roots.push(PathBuf::from("/Applications"));
             allowed_exec_roots.push(PathBuf::from("/usr"));
             allowed_exec_roots.push(PathBuf::from("/opt"));
@@ -709,6 +778,8 @@ impl Config {
         #[cfg(target_os = "linux")]
         {
             backup_sibling_roots.push(home.join(".config"));
+            electron_sweep_roots.push(home.join(".local/share"));
+            electron_sweep_roots.push(PathBuf::from("/opt"));
             allowed_exec_roots.push(PathBuf::from("/usr"));
             allowed_exec_roots.push(PathBuf::from("/opt"));
             allowed_exec_roots.push(PathBuf::from("/bin"));
@@ -895,6 +966,15 @@ impl Config {
             read_burst_baseline_warm_up_floor_bytes: 512.0 * 1024.0,
             read_burst_ema_alpha: 0.2,
             c2_max_decode_depth: 4,
+            electron_sweep_enabled: true,
+            // Once per hour, per the task's own calibration -- slow enough
+            // that a full content scan plus an existing-file backup-sibling
+            // walk over every discovered install never competes with the
+            // live watchers for disk I/O, fast enough that a miss like the
+            // Antigravity one is caught same-day instead of five weeks
+            // later.
+            electron_sweep_interval_secs: 60 * 60,
+            electron_sweep_roots,
         }
     }
 }

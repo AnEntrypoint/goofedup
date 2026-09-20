@@ -1,7 +1,10 @@
 use clap::Parser;
 use goofedup::alert::AlertSink;
 use goofedup::config::{dirs_home, override_path, Config, ConfigOverrides, SharedConfig};
-use goofedup::{config_reload, scan_js, watch_file, watch_network, watch_persistence, watch_process};
+use goofedup::{
+    config_reload, correlate, electron_sweep, scan_js, watch_file, watch_network, watch_persistence,
+    watch_process,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -34,6 +37,19 @@ struct Args {
     /// if anything was flagged, so it composes with CI/pre-commit tooling.
     #[arg(long, value_name = "PATH")]
     scan_deps: Option<PathBuf>,
+
+    /// Companion to --scan-deps for a miss the live watcher didn't catch:
+    /// finds every live file under --scan-deps' PATH that has a preserved
+    /// *.orig/*.bak/*.inz-style original sibling next to it (verifying the
+    /// preserved original itself is clean of HiddenSpawn markers first),
+    /// and safely restores the live file from it -- moving the current
+    /// (tampered) live file into ~/.goofedup/quarantine/ rather than ever
+    /// deleting it. Opt-in and separate from --scan-deps' own default
+    /// report-only behavior: with --scan-deps alone, nothing here runs at
+    /// all. Every candidate is printed (what would be restored, from
+    /// where) before anything on disk changes.
+    #[arg(long, requires = "scan_deps")]
+    fix: bool,
 }
 
 fn main() {
@@ -52,6 +68,12 @@ fn main() {
         }
         let alerts = AlertSink::new(initial_cfg.log_path.clone());
         let flagged = scan_js::scan_project(root, &alerts);
+        // --fix is opt-in and separate from --scan-deps' own default
+        // behavior above -- with --scan-deps alone, nothing past this point
+        // runs at all.
+        if args.fix {
+            scan_js::remediate_project(root, &alerts, true);
+        }
         std::process::exit(if flagged > 0 { 1 } else { 0 });
     }
 
@@ -71,6 +93,20 @@ fn main() {
         let alerts_for_response = alerts.clone();
         alerts.add_on_alert(move |a| {
             response.on_alert(a, &alerts_for_response);
+        });
+    }
+
+    // Cross-detector correlation: a c2-shaped-process alert and a
+    // backup-sibling/bootstrap-size alert firing within ~60s of each other
+    // are almost certainly the same real compromise -- emit one combined
+    // CONFIRMED-COMPROMISE alert instead of leaving correlation as an
+    // exercise for whoever reads the log later.
+    let correlator = Arc::new(correlate::Correlator::new());
+    {
+        let correlator = correlator.clone();
+        let alerts_for_correlate = alerts.clone();
+        alerts.add_on_alert(move |a| {
+            correlator.on_alert(a, &alerts_for_correlate);
         });
     }
 
@@ -141,6 +177,12 @@ fn main() {
         handles.push(std::thread::spawn(move || {
             config_reload::run(cfg, overrides_shared, override_file, alerts, running)
         }));
+    }
+    {
+        let cfg = cfg.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        handles.push(std::thread::spawn(move || electron_sweep::run(cfg, alerts, running)));
     }
 
     while running.load(Ordering::Relaxed) {

@@ -1,6 +1,8 @@
 pub mod alert;
 pub mod config;
 pub mod config_reload;
+pub mod correlate;
+pub mod electron_sweep;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod heuristics;

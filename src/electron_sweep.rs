@@ -1,0 +1,170 @@
+// Periodic proactive sweep for Electron/VSCode-family app installs.
+//
+// Every other watcher in this project only sees a NEW event from the moment
+// it starts (a file changing, a backup sibling appearing), and the one
+// content-scanning response that exists (scan_js::AlertResponse) only
+// widens to an app's whole install tree AFTER some other alert already
+// names that app by path. Both gaps let a real incident sit undetected: the
+// Antigravity IDE compromise (a VSCode-fork, not Discord/Adobe/Slack/Teams,
+// so never on the hardcoded RISKY_APP_DIR_NAMES list, and never a
+// bootstrap_watch/backup_sibling_roots entry either) sat compromised for
+// 5+ weeks because nothing was ever pointed at it.
+//
+// This module closes that gap proactively instead of reactively: it
+// auto-discovers Electron/VSCode-family installs by SHAPE --
+// `resources/app.asar`, a `node_modules/@vscode/*` tree, or an
+// `electron(.exe)` binary next to a `resources` dir -- under a small set of
+// per-user install roots (typically `%LOCALAPPDATA%\Programs` on Windows),
+// and re-runs the same HiddenSpawn content scan (scan_js::scan_project)
+// plus an existing-file backup-sibling walk over each one on its own
+// slower, config-tunable cadence. A novel target is covered the first time
+// this runs, not only after some other alert happens to name it.
+
+use crate::alert::AlertSink;
+use crate::config::SharedConfig;
+use crate::heuristics::is_backup_sibling_name;
+use crate::scan_js;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use walkdir::WalkDir;
+
+/// How deep under a sweep root to look for an install's signature files --
+/// deep enough to reach `Programs/<Vendor>/<App>/resources/app.asar` (three
+/// to four path segments under `Programs` itself) without turning into an
+/// unbounded full-disk walk if a root is pointed at something huge.
+const DISCOVERY_MAX_DEPTH: usize = 6;
+
+fn looks_like_electron_or_vscode_install(dir: &Path) -> bool {
+    if dir.join("resources").join("app.asar").is_file() {
+        return true;
+    }
+    if dir.join("node_modules").join("@vscode").is_dir() {
+        return true;
+    }
+    if dir.join("resources").is_dir()
+        && (dir.join("electron.exe").is_file() || dir.join("electron").is_file())
+    {
+        return true;
+    }
+    false
+}
+
+/// Walks every configured sweep root and returns each directory that looks
+/// like an Electron/VSCode-family app's install directory, deduplicated.
+pub fn discover_installs(roots: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(root)
+            .max_depth(DISCOVERY_MAX_DEPTH)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_dir() {
+                continue;
+            }
+            let dir = entry.path();
+            if looks_like_electron_or_vscode_install(dir) && seen.insert(dir.to_path_buf()) {
+                found.push(dir.to_path_buf());
+            }
+        }
+    }
+    found
+}
+
+/// Checks an already-discovered install tree for a *.orig/*.bak/*.inz-style
+/// backup sibling that is ALREADY present on disk. The live file watcher
+/// (watch_file::check_backup_sibling) only ever sees one APPEAR, as a
+/// filesystem event, from the moment it starts -- a backup file dropped
+/// before this tool was ever running on this machine (exactly the shape of
+/// the 2026-08-11 and 2026-09-19 misses) is otherwise invisible to it
+/// forever. This is the same check, run as a one-shot existing-file walk
+/// instead of an event handler.
+fn sweep_existing_backup_siblings(root: &Path, alerts: &AlertSink) {
+    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if is_backup_sibling_name(name) {
+            alerts.critical(
+                "backup-sibling",
+                "a *.orig/*.bak/*.inz-style backup file already exists inside a proactively-swept Electron/VSCode-family install -- this is exactly the shape an infector leaves behind to preserve the original while it replaces the real file",
+                entry.path().display().to_string(),
+            );
+        }
+    }
+}
+
+pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
+    let mut already_reported: HashSet<PathBuf> = HashSet::new();
+    let mut first_pass = true;
+
+    while running.load(Ordering::Relaxed) {
+        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+
+        if first_pass {
+            alerts.info(
+                "electron-sweep",
+                if cfg.electron_sweep_enabled {
+                    format!(
+                        "proactive Electron/VSCode-family sweep active: scanning {} root(s) for app installs by shape every {}s",
+                        cfg.electron_sweep_roots.len(),
+                        cfg.electron_sweep_interval_secs
+                    )
+                } else {
+                    "proactive Electron/VSCode-family sweep disabled via config".to_string()
+                },
+            );
+            first_pass = false;
+        }
+
+        if cfg.electron_sweep_enabled {
+            let installs = discover_installs(&cfg.electron_sweep_roots);
+            for install in &installs {
+                if already_reported.insert(install.clone()) {
+                    alerts.info(
+                        "electron-sweep",
+                        format!(
+                            "discovered Electron/VSCode-family install by shape (app.asar / @vscode module tree / electron binary), not a hardcoded name list: {}",
+                            install.display()
+                        ),
+                    );
+                }
+            }
+            for install in &installs {
+                if !running.load(Ordering::Relaxed) {
+                    return;
+                }
+                scan_js::scan_project(install, &alerts);
+                sweep_existing_backup_siblings(install, &alerts);
+            }
+        }
+
+        sleep_in_chunks(cfg.electron_sweep_interval_secs, &running);
+    }
+}
+
+/// Sleeps up to `total_secs`, but in short chunks so a Quit/Ctrl+C is
+/// honored promptly instead of the thread sleeping through the whole
+/// (potentially hour-long) interval before it can even check `running`.
+fn sleep_in_chunks(total_secs: u64, running: &AtomicBool) {
+    let mut remaining = Duration::from_secs(total_secs);
+    let step = Duration::from_millis(500);
+    while remaining > Duration::ZERO {
+        if !running.load(Ordering::Relaxed) {
+            return;
+        }
+        let chunk = remaining.min(step);
+        std::thread::sleep(chunk);
+        remaining -= chunk;
+    }
+}

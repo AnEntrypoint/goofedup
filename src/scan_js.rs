@@ -9,7 +9,7 @@
 use crate::alert::{Alert, AlertSink};
 use crate::heuristics::{
     find_appended_packed_payload, find_config_payload_disproportion,
-    find_hidden_unicode_escape_run, find_javascript_masquerading_as_asset,
+    find_hidden_unicode_escape_run, find_javascript_masquerading_as_asset, strip_backup_markers,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -391,4 +391,174 @@ fn first_absolute_path(text: &str) -> Option<&str> {
         }
     }
     None
+}
+
+// -- One-shot safe remediation for a miss the live watcher didn't catch --
+//
+// The live watcher, when it catches a backup-sibling event as it happens,
+// already knows the file that just appeared IS the preserved original and
+// the file it sits next to IS the live one that just got overwritten --
+// that ordering is implicit in the event itself. `--scan-deps` runs after
+// the fact with no such ordering information, only a snapshot of whatever
+// is on disk, so it has to derive the same (live, preserved-original) pairing
+// from filenames and content instead. This is exactly the operational gap
+// live-witnessed during the Antigravity remediation: moving the malicious
+// payload out of the way is not the same as restoring the live bootstrap
+// file that was pointing at it, and doing the second step by hand, without
+// double-checking the preserved original was actually clean, is exactly
+// where a real mistake happened.
+
+/// One safe-restore candidate: a live file with a preserved-original
+/// sibling next to it (see `strip_backup_markers`) whose content differs
+/// from the live file's, where the preserved original itself contains no
+/// HiddenSpawn-family marker.
+pub struct RemediationCandidate {
+    pub live_path: PathBuf,
+    pub orig_path: PathBuf,
+}
+
+/// Finds every safe-restore candidate under `root`: for each file whose
+/// name carries a backup-marker suffix (*.orig, *.bak, *.inz, *.original,
+/// *.old, or a doubled marker like *.inz.orig), strips the marker to get
+/// the live file's name, and pairs them up ONLY when:
+///   1. a file by that stripped name actually exists next to it, AND
+///   2. its content differs from the marker-suffixed file's (nothing to
+///      restore if they're identical), AND
+///   3. the marker-suffixed (preserved-original) file itself contains no
+///      HiddenSpawn-family marker -- refusing to "restore" FROM a file that
+///      is itself tampered, which would just complete the compromise
+///      instead of undoing it.
+/// A marker-suffixed name that doesn't strip down to an existing sibling at
+/// all (a real payload filename that merely contains "inz", e.g.
+/// "index.inz.cjs" -- see strip_backup_markers's own doc comment) never
+/// becomes a candidate in the first place.
+pub fn find_remediation_candidates(root: &Path) -> Vec<RemediationCandidate> {
+    let mut out = Vec::new();
+    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let stripped = strip_backup_markers(name);
+        if stripped == name {
+            continue;
+        }
+        let live_path = path.with_file_name(&stripped);
+        if !live_path.is_file() {
+            continue;
+        }
+        let (Ok(orig_bytes), Ok(live_bytes)) = (std::fs::read(path), std::fs::read(&live_path)) else {
+            continue;
+        };
+        if orig_bytes == live_bytes {
+            continue;
+        }
+        if let Ok(orig_text) = std::str::from_utf8(&orig_bytes) {
+            if find_hidden_unicode_escape_run(orig_text).is_some()
+                || find_appended_packed_payload(orig_text).is_some()
+            {
+                continue;
+            }
+        }
+        out.push(RemediationCandidate {
+            live_path,
+            orig_path: path.to_path_buf(),
+        });
+    }
+    out
+}
+
+/// Reports every safe-restore candidate under `root`, printing exactly what
+/// it is about to do BEFORE doing it -- and, only when `apply` is true,
+/// actually performs the restore. `apply=false` is a completely safe dry
+/// run: every candidate is still reported, nothing on disk changes. Nothing
+/// is ever deleted: the current (tampered) live file is moved into
+/// `~/.goofedup/quarantine/` -- preserved as evidence, exactly the same
+/// non-destructive posture this project already takes everywhere else --
+/// before the verified-clean preserved original is copied into its place.
+/// Returns the number of candidates found (restored or not).
+pub fn remediate_project(root: &Path, alerts: &AlertSink, apply: bool) -> usize {
+    let candidates = find_remediation_candidates(root);
+    if candidates.is_empty() {
+        alerts.info(
+            "remediate",
+            format!("no safe-restore candidates found under {}", root.display()),
+        );
+        return 0;
+    }
+
+    for c in &candidates {
+        alerts.warn(
+            "remediate",
+            format!(
+                "{} restore '{}' from verified-clean preserved original '{}'",
+                if apply { "about to" } else { "would" },
+                c.live_path.display(),
+                c.orig_path.display()
+            ),
+            "orig contains no HiddenSpawn-family marker; live content differs from orig -- pass --fix to actually restore".to_string(),
+        );
+        if apply {
+            match do_restore(c) {
+                Ok(quarantine_path) => {
+                    alerts.critical(
+                        "remediate",
+                        format!(
+                            "restored '{}' from '{}' -- tampered version preserved (not deleted) at '{}'",
+                            c.live_path.display(),
+                            c.orig_path.display(),
+                            quarantine_path.display()
+                        ),
+                        String::new(),
+                    );
+                }
+                Err(e) => {
+                    alerts.critical(
+                        "remediate",
+                        format!("FAILED to restore '{}' -- live file left untouched", c.live_path.display()),
+                        e,
+                    );
+                }
+            }
+        }
+    }
+
+    if !apply {
+        alerts.info(
+            "remediate",
+            format!(
+                "{} candidate(s) found -- re-run with --scan-deps {} --fix to actually restore",
+                candidates.len(),
+                root.display()
+            ),
+        );
+    }
+
+    candidates.len()
+}
+
+/// Moves the current live file into `~/.goofedup/quarantine/` (never
+/// deletes it) then copies the verified-clean preserved original into the
+/// live file's place. Returns the quarantine path the tampered version now
+/// lives at.
+fn do_restore(c: &RemediationCandidate) -> Result<PathBuf, String> {
+    let quarantine_dir = crate::config::dirs_home().join(".goofedup").join("quarantine");
+    std::fs::create_dir_all(&quarantine_dir).map_err(|e| e.to_string())?;
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f");
+    let safe_name = c
+        .live_path
+        .to_string_lossy()
+        .replace(['\\', '/', ':'], "_");
+    let quarantine_path = quarantine_dir.join(format!("{safe_name}.{ts}"));
+    std::fs::rename(&c.live_path, &quarantine_path).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::copy(&c.orig_path, &c.live_path) {
+        // Best-effort: put the tampered file back rather than leaving the
+        // live path missing entirely if the copy step itself fails.
+        let _ = std::fs::rename(&quarantine_path, &c.live_path);
+        return Err(e.to_string());
+    }
+    Ok(quarantine_path)
 }
