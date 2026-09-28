@@ -11,8 +11,8 @@ use goofedup::config::{dirs_home, override_path, ConfigOverrides, SharedConfig};
 use goofedup::gui::icon::IconState;
 use goofedup::gui::{alert_window, autostart, history::History, icon, single_instance, toast};
 use goofedup::{
-    config_reload, correlate, electron_sweep, scan_js, watch_file, watch_network, watch_persistence,
-    watch_process, watch_repos, watch_tamper,
+    config_reload, correlate, electron_sweep, scan_js, self_protect, watch_events, watch_file,
+    watch_network, watch_persistence, watch_process, watch_repos, watch_tamper,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,6 +64,11 @@ fn should_pop_toast(last_toasted: &Mutex<HashMap<String, Instant>>, a: &Alert) -
 }
 
 fn main() {
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(exit_code) = goofedup::gui::hardened::run_cli(&cli_args) {
+        std::process::exit(exit_code);
+    }
+
     let Some(_instance_guard) = single_instance::acquire() else {
         return;
     };
@@ -262,7 +267,7 @@ fn main() {
                     autostart_item.set_checked(autostart::is_enabled());
                     alerts.critical(
                         "goofedup-gui",
-                        "could not update Start with Windows -- registry write to HKCU Run failed",
+                        "could not update Start with Windows -- the Run key write or the hardened scheduled task change failed (changing the hardened task needs an elevated run)",
                         format!("requested checked={}", autostart_item.is_checked()),
                     );
                 }
@@ -416,6 +421,7 @@ fn spawn_watchers(
         let cfg = cfg.clone();
         let alerts = alerts.clone();
         let running = running.clone();
+        let override_file = override_file.clone();
         std::thread::spawn(move || config_reload::run(cfg, overrides_shared, override_file, alerts, running));
     }
     {
@@ -429,5 +435,17 @@ fn spawn_watchers(
         let alerts = alerts.clone();
         let running = running.clone();
         std::thread::spawn(move || watch_repos::run(roots, alerts, running));
+    }
+    {
+        let cfg = cfg.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        std::thread::spawn(move || watch_events::run(cfg, alerts, running));
+    }
+    {
+        let cfg = cfg.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        std::thread::spawn(move || self_protect::run(cfg, alerts, running, override_file));
     }
 }

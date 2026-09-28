@@ -5,6 +5,7 @@ pub mod config;
 pub mod config_reload;
 pub mod correlate;
 pub mod electron_sweep;
+pub mod event_rules;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod heuristics;
@@ -17,9 +18,14 @@ pub mod scan_js;
 pub mod scan_repo;
 pub mod tamper_config;
 pub mod trust;
+pub mod self_protect;
+pub mod sysmon_config;
+pub mod watch_events;
 pub mod watch_file;
 pub mod watch_network;
 pub mod watch_persistence;
 pub mod watch_process;
 pub mod watch_tamper;
 pub mod watch_repos;
+#[cfg(windows)]
+pub mod win_identity;

@@ -2,8 +2,9 @@ use clap::Parser;
 use goofedup::alert::AlertSink;
 use goofedup::config::{dirs_home, override_path, Config, ConfigOverrides, SharedConfig};
 use goofedup::{
-    audit_win, config_reload, correlate, electron_sweep, repo_fix, scan_js, scan_repo, watch_file,
-    watch_network, watch_persistence, watch_process, watch_repos, watch_tamper,
+    audit_win, config_reload, correlate, electron_sweep, repo_fix, scan_js, scan_repo, self_protect,
+    sysmon_config, watch_events, watch_file, watch_network, watch_persistence, watch_process,
+    watch_repos, watch_tamper,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,10 +65,26 @@ struct Args {
         help = "Run only the repo-compromise watcher (hidden .vscode tasks, allowAutomaticTasks, payload-hiding .gitignore, lifecycle droppers, tampered configs) over PATH(s), or over repo_watch_roots when none are given"
     )]
     watch_repos: Option<Vec<PathBuf>>,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        num_args = 0..=1,
+        help = "Print the recommended Sysmon 15.x config (ATT&CK-tagged, minimal high-signal set) to stdout, or write it to PATH; never applies it"
+    )]
+    sysmon_config: Option<Option<PathBuf>>,
 }
 
 fn main() {
     let args = Args::parse();
+    if let Some(target) = &args.sysmon_config {
+        if let Err(e) = sysmon_config::emit(target.as_deref()) {
+            eprintln!("sysmon config write failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let override_file = override_path(&dirs_home());
     let (initial_cfg, initial_overrides) = config_reload::load_config_with_overrides(&override_file);
 
@@ -228,6 +245,21 @@ fn main() {
         let alerts = alerts.clone();
         let running = running.clone();
         handles.push(std::thread::spawn(move || watch_repos::run(roots, alerts, running)));
+    }
+    {
+        let cfg = cfg.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        handles.push(std::thread::spawn(move || watch_events::run(cfg, alerts, running)));
+    }
+    {
+        let cfg = cfg.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        let override_file = override_file.clone();
+        handles.push(std::thread::spawn(move || {
+            self_protect::run(cfg, alerts, running, override_file)
+        }));
     }
 
     while running.load(Ordering::Relaxed) {

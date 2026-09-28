@@ -234,6 +234,7 @@ pub struct Config {
     pub unsigned_user_writable_policy: UnsignedUserWritablePolicy,
 
     pub repo_watch_roots: Vec<PathBuf>,
+    pub known_benign_event_sources: Vec<String>,
 }
 
 pub struct BootstrapEntry {
@@ -290,6 +291,7 @@ pub struct ConfigOverrides {
     pub trusted_publishers: Option<Vec<String>>,
     pub unsigned_user_writable_policy: Option<UnsignedUserWritablePolicy>,
     pub repo_watch_roots: Option<Vec<PathBuf>>,
+    pub known_benign_event_sources: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -404,6 +406,9 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     }
     if let Some(v) = &o.repo_watch_roots {
         base.repo_watch_roots = v.clone();
+    }
+    if let Some(v) = &o.known_benign_event_sources {
+        base.known_benign_event_sources = v.clone();
     }
     base
 }
@@ -693,6 +698,14 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
                     value: marked(r.display().to_string(), overrides.repo_watch_roots.is_some()),
                 })
                 .collect(),
+        },
+        ConfigSection {
+            title: "Known Benign Event Sources",
+            description: "Executable names whose Windows event-log findings (CreateRemoteThread, process lineage, lsass access, tampering) are downgraded to Info with a note -- still recorded, never suppressed.",
+            rows: vec![ConfigRow {
+                label: "Source names".to_string(),
+                value: marked(cfg.known_benign_event_sources.join(", "), overrides.known_benign_event_sources.is_some()),
+            }],
         },
     ];
     sections.push(cfg.tamper.section(&overrides.tamper));
@@ -1038,6 +1051,7 @@ impl Config {
             trusted_publishers: crate::trust::default_trusted_publishers(),
             unsigned_user_writable_policy: UnsignedUserWritablePolicy::default(),
             repo_watch_roots: default_repo_watch_roots(&home),
+            known_benign_event_sources: vec!["agentplug-runner.exe".to_string()],
         }
     }
 }
