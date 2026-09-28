@@ -22,9 +22,8 @@ const JS_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "tsx"];
 /// Asset extensions a real font/image uses. The 2026-09 HiddenSpawn wave
 /// stuffed a packed IIFE into `fa-solid-400.woff2` (magic `glob` / ASCII
 /// `global['!']` instead of woff2). A JS-only walk never opens these.
-const ASSET_EXTENSIONS: &[&str] = &[
-    "woff", "woff2", "ttf", "otf", "eot", "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp",
-];
+const ASSET_EXTENSIONS: &[&str] = crate::command_shape::NON_SOURCE_ASSET_EXTENSIONS;
+const ASSET_PREFIX_BYTES: u64 = 64 * 1024;
 
 /// Directory names never worth descending into for this scan: version
 /// control internals (never shipped/executed), and common noise dirs whose
@@ -185,7 +184,7 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
             continue;
         }
         if ext_is(path, ASSET_EXTENSIONS) {
-            let Ok(bytes) = std::fs::read(path) else {
+            let Some(bytes) = crate::scan_repo::read_prefix(path, ASSET_PREFIX_BYTES) else {
                 continue;
             };
             total_scanned += 1;

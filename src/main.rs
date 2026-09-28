@@ -2,8 +2,8 @@ use clap::Parser;
 use goofedup::alert::AlertSink;
 use goofedup::config::{dirs_home, override_path, Config, ConfigOverrides, SharedConfig};
 use goofedup::{
-    audit_win, config_reload, correlate, electron_sweep, scan_js, watch_file, watch_network,
-    watch_persistence, watch_process, watch_tamper,
+    audit_win, config_reload, correlate, electron_sweep, repo_fix, scan_js, scan_repo, watch_file,
+    watch_network, watch_persistence, watch_process, watch_repos, watch_tamper,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,17 +38,11 @@ struct Args {
     #[arg(long, value_name = "PATH")]
     scan_deps: Option<PathBuf>,
 
-    /// Companion to --scan-deps for a miss the live watcher didn't catch:
-    /// finds every live file under --scan-deps' PATH that has a preserved
-    /// *.orig/*.bak/*.inz-style original sibling next to it (verifying the
-    /// preserved original itself is clean of HiddenSpawn markers first),
-    /// and safely restores the live file from it -- moving the current
-    /// (tampered) live file into ~/.goofedup/quarantine/ rather than ever
-    /// deleting it. Opt-in and separate from --scan-deps' own default
-    /// report-only behavior: with --scan-deps alone, nothing here runs at
-    /// all. Every candidate is printed (what would be restored, from
-    /// where) before anything on disk changes.
-    #[arg(long, requires = "scan_deps")]
+    #[arg(
+        long,
+        requires = "scan_deps",
+        help = "Opt-in remediation over the --scan-deps PATH: restores live files from verified-clean *.orig/*.bak siblings and quarantines repo-compromise launchers (decoy dirs, payload files, injected settings keys). Every action is printed before anything changes; originals and tampered files move to ~/.goofedup/quarantine, never deleted"
+    )]
     fix: bool,
 
     /// One-shot Windows posture audit: portproxy rules, exposed debugger/admin
@@ -63,6 +57,13 @@ struct Args {
     /// line cap.
     #[arg(long, requires = "audit")]
     audit_all: bool,
+    #[arg(
+        long,
+        value_name = "PATH",
+        num_args = 0..,
+        help = "Run only the repo-compromise watcher (hidden .vscode tasks, allowAutomaticTasks, payload-hiding .gitignore, lifecycle droppers, tampered configs) over PATH(s), or over repo_watch_roots when none are given"
+    )]
+    watch_repos: Option<Vec<PathBuf>>,
 }
 
 fn main() {
@@ -84,12 +85,15 @@ fn main() {
             let _ = std::fs::create_dir_all(parent);
         }
         let alerts = AlertSink::new(initial_cfg.log_path.clone());
-        let flagged = scan_js::scan_project(root, &alerts);
+        let flagged = scan_js::scan_project(root, &alerts) + scan_repo::scan_tree(root, &alerts);
         // --fix is opt-in and separate from --scan-deps' own default
         // behavior above -- with --scan-deps alone, nothing past this point
         // runs at all.
         if args.fix {
+            scan_js::remediate_project(root, &alerts, false);
+            repo_fix::remediate_tree(root, &alerts, false);
             scan_js::remediate_project(root, &alerts, true);
+            repo_fix::remediate_tree(root, &alerts, true);
         }
         std::process::exit(if flagged > 0 { 1 } else { 0 });
     }
@@ -144,6 +148,16 @@ fn main() {
             running.store(false, Ordering::Relaxed);
         })
         .expect("failed to set Ctrl+C handler");
+    }
+
+    if let Some(paths) = &args.watch_repos {
+        let roots = if paths.is_empty() {
+            cfg.read().unwrap_or_else(std::sync::PoisonError::into_inner).repo_watch_roots.clone()
+        } else {
+            paths.clone()
+        };
+        watch_repos::run(roots, alerts, running);
+        return;
     }
 
     let mut handles = Vec::new();
@@ -208,6 +222,12 @@ fn main() {
         let alerts = alerts.clone();
         let running = running.clone();
         handles.push(std::thread::spawn(move || electron_sweep::run(cfg, alerts, running)));
+    }
+    {
+        let roots = cfg.read().unwrap_or_else(std::sync::PoisonError::into_inner).repo_watch_roots.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        handles.push(std::thread::spawn(move || watch_repos::run(roots, alerts, running)));
     }
 
     while running.load(Ordering::Relaxed) {

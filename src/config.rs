@@ -232,6 +232,8 @@ pub struct Config {
     pub tamper: crate::tamper_config::TamperConfig,
     pub trusted_publishers: Vec<String>,
     pub unsigned_user_writable_policy: UnsignedUserWritablePolicy,
+
+    pub repo_watch_roots: Vec<PathBuf>,
 }
 
 pub struct BootstrapEntry {
@@ -287,6 +289,7 @@ pub struct ConfigOverrides {
     pub tamper: crate::tamper_config::TamperOverrides,
     pub trusted_publishers: Option<Vec<String>>,
     pub unsigned_user_writable_policy: Option<UnsignedUserWritablePolicy>,
+    pub repo_watch_roots: Option<Vec<PathBuf>>,
 }
 
 #[derive(Deserialize)]
@@ -398,6 +401,9 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     }
     if let Some(v) = &o.unsigned_user_writable_policy {
         base.unsigned_user_writable_policy = v.clone();
+    }
+    if let Some(v) = &o.repo_watch_roots {
+        base.repo_watch_roots = v.clone();
     }
     base
 }
@@ -674,6 +680,19 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
                     ),
                 },
             ],
+        },
+        ConfigSection {
+            title: "Repo Compromise Watch",
+            description: "Dev roots watched recursively for a hidden .vscode/tasks.json auto-run task, task.allowAutomaticTasks in workspace settings, a payload-hiding .gitignore entry, a package.json lifecycle dropper, a tampered *.config.js, a risky workflow or git hook, or JavaScript disguised as a font/image -- checked within a couple of seconds of the file changing.",
+            rows: cfg
+                .repo_watch_roots
+                .iter()
+                .enumerate()
+                .map(|(i, r)| ConfigRow {
+                    label: format!("Root {}", i + 1),
+                    value: marked(r.display().to_string(), overrides.repo_watch_roots.is_some()),
+                })
+                .collect(),
         },
     ];
     sections.push(cfg.tamper.section(&overrides.tamper));
@@ -1018,8 +1037,18 @@ impl Config {
             tamper: crate::tamper_config::TamperConfig::default(),
             trusted_publishers: crate::trust::default_trusted_publishers(),
             unsigned_user_writable_policy: UnsignedUserWritablePolicy::default(),
+            repo_watch_roots: default_repo_watch_roots(&home),
         }
     }
+}
+
+fn default_repo_watch_roots(home: &std::path::Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    #[cfg(windows)]
+    roots.extend([r"C:\dev", r"D:\dev", r"C:\d"].map(PathBuf::from));
+    roots.extend(["dev", "src", "projects", "Documents"].map(|dir| home.join(dir)));
+    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    roots
 }
 
 pub fn dirs_home() -> PathBuf {

