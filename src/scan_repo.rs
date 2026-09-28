@@ -551,9 +551,9 @@ fn workflow_findings(path: &Path, text: &str) -> Vec<Finding> {
         ));
     }
     if command_shape::pipes_download_to_interpreter(text) {
-        out.push(Finding::critical(
+        out.push(Finding::warn(
             "workflow-risk",
-            format!("'{}' pipes a download straight into an interpreter (curl|bash shape)", path.display()),
+            format!("'{}' pipes a download straight into an interpreter (curl|bash shape) -- fine for a pinned first-party installer, dangerous for anything else", path.display()),
             "download piped into bash/sh/iex/node/python".to_string(),
         ));
     }
