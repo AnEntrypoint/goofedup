@@ -84,7 +84,7 @@
 - agentplug-runner.exe is unsigned and self-updating, so its hash pin breaks every update; fix = gm signs the binary and its publisher joins `trusted_publishers`. A parent that started later than the child is pid reuse.
 
 ## Events, self-protection, hardened install
-- `watch_events` uses EvtSubscribe push with bookmarks in `~/.goofedup/events.bookmarks.json`: Sysmon/Security XPath queries take seconds on 1 GB logs. `EvtNext` ERROR_TIMEOUT (1460) is NOT end-of-results (treating it so skipped events). Windows 11 build 26200 logs firewall changes as 2097/2099/2052/2059, not 2004-2006. First-run lookback is 24 h (6 h Sysmon), so a fresh bookmark replays the backlog loudly. Sysmon Company is `-` for unsigned.
+- `watch_events` uses EvtSubscribe push with bookmarks in `~/.goofedup/events.bookmarks.json`: Sysmon/Security XPath queries take seconds on 1 GB logs. `EvtNext` ERROR_TIMEOUT (1460) is NOT end-of-results (treating it so skipped events). Windows 11 build 26200 logs firewall changes as 2097/2099/2052/2059, not 2004-2006. First-run lookback is 1 h (6 h Defender) per channel in `event_rules::CHANNELS`; it was 24 h and a fresh bookmark replayed ~100 Criticals in 14 s. Sysmon Company is `-` for unsigned.
 - Hardened data-dir ACL is user read-only: an un-hardened CLI cannot write log/config there. A user-level process can pre-create mutex `Global\AnEntrypoint.Goofedup.SingleInstance` to make the elevated instance exit (open issue). `runas /trustlevel` yields a restricted HIGH token, not medium; launch through explorer.exe for a real medium token.
 - Noise: Defender flags gm `node -e` dispatch scripts as Trojan:Win32/SuspExec.SE (expected here); agentplug-runner CreateRemoteThread (Sysmon 8) is a known-benign shape.
 

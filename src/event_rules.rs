@@ -20,16 +20,16 @@ pub struct ChannelSpec {
 }
 
 pub static CHANNELS: [ChannelSpec; 6] = [
-    ChannelSpec { channel: CH_SECURITY, event_ids: &[4697, 4698, 4702, 4720, 4728, 4732, 1102], first_run_lookback_hours: 24 },
-    ChannelSpec { channel: CH_SYSTEM, event_ids: &[7045, 104], first_run_lookback_hours: 24 },
+    ChannelSpec { channel: CH_SECURITY, event_ids: &[4697, 4698, 4702, 4720, 4728, 4732, 1102], first_run_lookback_hours: 1 },
+    ChannelSpec { channel: CH_SYSTEM, event_ids: &[7045, 104], first_run_lookback_hours: 1 },
     ChannelSpec {
         channel: CH_DEFENDER,
         event_ids: &[1116, 1117, 1118, 1119, 5001, 5004, 5007, 5010, 5012],
-        first_run_lookback_hours: 24,
+        first_run_lookback_hours: 6,
     },
-    ChannelSpec { channel: CH_SYSMON, event_ids: &[1, 8, 10, 25], first_run_lookback_hours: 6 },
-    ChannelSpec { channel: CH_FIREWALL, event_ids: &[2004, 2005, 2006, 2097, 2099, 2052, 2059], first_run_lookback_hours: 24 },
-    ChannelSpec { channel: CH_TASKS, event_ids: &[106, 140, 141], first_run_lookback_hours: 24 },
+    ChannelSpec { channel: CH_SYSMON, event_ids: &[1, 8, 10, 25], first_run_lookback_hours: 1 },
+    ChannelSpec { channel: CH_FIREWALL, event_ids: &[2004, 2005, 2006, 2097, 2099, 2052, 2059], first_run_lookback_hours: 1 },
+    ChannelSpec { channel: CH_TASKS, event_ids: &[106, 140, 141], first_run_lookback_hours: 1 },
 ];
 
 pub struct EventRecord {
