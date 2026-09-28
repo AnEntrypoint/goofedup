@@ -1,11 +1,8 @@
-// Bounded in-memory alert history for the tray app's "Show recent alerts"
-// window -- newest first, capped so a noisy session can't grow unbounded.
-
 use crate::alert::{Alert, Level};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-const CAP: usize = 200;
+const MAX_RETAINED_ENTRIES: usize = 200;
 
 pub struct Entry {
     pub ts: String,
@@ -259,7 +256,7 @@ impl History {
                 evidence: a.evidence.clone(),
             },
         );
-        entries.truncate(CAP);
+        entries.truncate(MAX_RETAINED_ENTRIES);
         let still_relevant = currently_groupable_keys(&entries);
         drop(entries);
         let mut acknowledged = lock_recovering(&self.acknowledged_groups);

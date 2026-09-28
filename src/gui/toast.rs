@@ -1,8 +1,3 @@
-// Native Windows toast notifications via WinRT ToastNotificationManager.
-// Unpackaged win32 apps need an explicit AppUserModelID registered before
-// any toast is shown, or the OS silently drops it -- init() must run once
-// before any call to show().
-
 use windows::core::HSTRING;
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::core::IInspectable;
@@ -18,8 +13,6 @@ pub fn init() {
     }
 }
 
-/// Shows a toast; `on_activated` fires when the user clicks the toast body
-/// (not a dismiss or a timeout) -- the click-to-open-history affordance.
 pub fn show(title: &str, body: &str, on_activated: impl Fn() + Send + Sync + 'static) {
     let xml = format!(
         "<toast activationType=\"foreground\" launch=\"open-history\"><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",

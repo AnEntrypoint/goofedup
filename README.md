@@ -48,8 +48,10 @@ Download the binary for your platform from the [latest release](https://github.c
 
 Ctrl+C to stop. Logs to `~/.goofedup/goofedup.log` (and stdout).
 
+`--show-config` prints the resolved watch list and thresholds, then exits.
+
 ```sh
-./goofedup --show-config   # print the resolved watch list and thresholds, then exit
+./goofedup --show-config
 ```
 
 ### Live-tunable config
@@ -119,9 +121,11 @@ alongside the CLI binary, or build it yourself (see below).
 
 ## Build from source
 
+The first command builds the CLI binary (`goofedup`), the second the Windows tray GUI.
+
 ```sh
-cargo build --release                          # CLI binary (goofedup)
-cargo build --release --features gui --bin goofedup-gui   # Windows tray GUI
+cargo build --release
+cargo build --release --features gui --bin goofedup-gui
 ```
 
 ## Verification

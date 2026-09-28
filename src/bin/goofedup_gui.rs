@@ -1,11 +1,5 @@
 #![windows_subsystem = "windows"]
 
-// Windows system-tray GUI for goofedup: runs the same watcher threads as
-// the CLI, but replaces console/log-only output with a tray icon that goes
-// red on an unacknowledged Critical alert plus a native toast per Warn/
-// Critical event, so "we done goofed" reaches the user without a terminal
-// window open.
-
 use goofedup::alert::{Alert, AlertSink, Level};
 use goofedup::config::{dirs_home, override_path, ConfigOverrides, SharedConfig};
 use goofedup::gui::icon::IconState;
@@ -22,24 +16,8 @@ use tao::event_loop::{ControlFlow, EventLoopBuilder};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
-/// How long after popping a toast for a given (category, subject) before
-/// another alert sharing that same identity pops a fresh one. Every alert
-/// still reaches the log and the history window regardless of this cooldown
-/// -- only the interruptive toast pop is throttled, so a real burst (a
-/// scanning loop, a retrying attacker) doesn't turn into dozens of
-/// back-to-back popups for what the user already saw once. Matches the
-/// history window's own alert-grouping identity (same process for
-/// file-read-burst/process-path, same obfuscation shape for
-/// c2-shaped-process) so "one group, one toast" stays consistent between
-/// the popup and the history list the user opens from it.
-const TOAST_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const PER_ALERT_IDENTITY_TOAST_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
-/// Pulls the same "subject" identity out of an alert that the history
-/// window groups alerts by -- the quoted process name for the categories
-/// that name one, or the alert's own message otherwise. Kept independent
-/// of history::extract_group_key (which operates on a stored EntrySnapshot,
-/// not a live &Alert) rather than adding a cross-module type dependency for
-/// one shared substring extraction.
 fn toast_throttle_key(a: &Alert) -> String {
     let subject = a
         .message
@@ -54,7 +32,7 @@ fn should_pop_toast(last_toasted: &Mutex<HashMap<String, Instant>>, a: &Alert) -
     let mut map = last_toasted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = Instant::now();
     let should_pop = match map.get(&key) {
-        Some(last) => now.duration_since(*last) >= TOAST_COOLDOWN,
+        Some(last) => now.duration_since(*last) >= PER_ALERT_IDENTITY_TOAST_COOLDOWN,
         None => true,
     };
     if should_pop {
@@ -106,23 +84,15 @@ fn main() {
         });
     }
 
-    // Alert-triggered response: any Warn/Critical alert naming an app sends
-    // the hidden-unicode-identifier content scan over that app's install
-    // tree. Registered before the watchers start so nothing slips past.
-    let response = Arc::new(scan_js::AlertResponse::new());
+    let hidden_unicode_scan_response = Arc::new(scan_js::AlertResponse::new());
     {
-        let response = response.clone();
+        let hidden_unicode_scan_response = hidden_unicode_scan_response.clone();
         let alerts_for_response = alerts.clone();
         alerts.add_on_alert(move |a| {
-            response.on_alert(a, &alerts_for_response);
+            hidden_unicode_scan_response.on_alert(a, &alerts_for_response);
         });
     }
 
-    // Cross-detector correlation: a c2-shaped-process alert and a
-    // backup-sibling/bootstrap-size alert firing within ~60s of each other
-    // are almost certainly the same real compromise -- emit one combined
-    // CONFIRMED-COMPROMISE alert instead of leaving correlation as an
-    // exercise for whoever reads the log later.
     let correlator = Arc::new(correlate::Correlator::new());
     {
         let correlator = correlator.clone();
@@ -132,12 +102,6 @@ fn main() {
         });
     }
 
-    // Live-witnessed coverage gap: this GUI had no autostart configured by
-    // default, so the watcher simply wasn't running at all for 2 of 4 known
-    // incident timestamps (2026-08-11, 2026-09-19). Enable "Start with
-    // Windows" automatically the very first time this runs -- still fully
-    // user-togglable afterward via the tray menu below, never re-forced on
-    // a later run.
     if is_first_run {
         let enabled = autostart::enable();
         alerts.info(
@@ -261,9 +225,6 @@ fn main() {
                     autostart::disable()
                 };
                 if !ok {
-                    // Revert the checkbox to the real registry state so the
-                    // UI never shows a toggle the write didn't actually
-                    // apply, and tell the user why.
                     autostart_item.set_checked(autostart::is_enabled());
                     alerts.critical(
                         "goofedup-gui",
@@ -315,9 +276,6 @@ impl IconStateKey {
     }
 }
 
-/// A toast's Activated handler runs on a WinRT callback thread, not the
-/// event loop -- it cannot touch tray/menu state directly, so it just
-/// flags the request and the event loop's own poll picks it up next tick.
 static OPEN_HISTORY_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn open_history_request() {

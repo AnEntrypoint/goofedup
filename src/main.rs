@@ -10,33 +10,19 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-/// goofedup -- cross-platform structural-anomaly watcher.
-///
-/// Catches malware by SHAPE, not signature: a known-tiny bootstrap file
-/// suddenly huge, a *.orig backup sibling appearing, an obfuscated C2-shaped
-/// process command line, a process running from a Recycle Bin / Trash path,
-/// a masquerading process name, a new service/scheduled-task registration,
-/// network scanning behavior, and the firewall silently going dark. Every
-/// signal in this list is a real fact from one real incident on one real
-/// machine, none of it required a signature database.
-///
-/// Alert-only. Nothing here kills a process, deletes a file, or blocks a
-/// connection automatically -- every alert that warrants action prints the
-/// exact command to run, so a false positive can never cause damage.
+const LONG_ABOUT: &str = "goofedup -- cross-platform structural-anomaly watcher.\n\nCatches malware by SHAPE, not signature: a known-tiny bootstrap file suddenly huge, a *.orig backup sibling appearing, an obfuscated C2-shaped process command line, a process running from a Recycle Bin / Trash path, a masquerading process name, a new service/scheduled-task registration, network scanning behavior, and the firewall silently going dark. Every signal in this list is a real fact from one real incident on one real machine, none of it required a signature database.\n\nAlert-only. Nothing here kills a process, deletes a file, or blocks a connection automatically -- every alert that warrants action prints the exact command to run, so a false positive can never cause damage.";
+
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, long_about = LONG_ABOUT)]
 struct Args {
-    /// Print the resolved config (watched paths, thresholds) and exit.
-    #[arg(long)]
+    #[arg(long, help = "Print the resolved config (watched paths, thresholds) and exit")]
     show_config: bool,
 
-    /// One-shot scan of a project directory (including node_modules) for
-    /// HiddenSpawn-family shapes: 4+ \uXXXX identifier escapes, a
-    /// multi-kilobyte packed IIFE appended as the last line of any JS-family
-    /// file (not just *.config.*), and font/image bytes whose magic is
-    /// JavaScript (the fa-solid-400.woff2 delivery vehicle). Exits non-zero
-    /// if anything was flagged, so it composes with CI/pre-commit tooling.
-    #[arg(long, value_name = "PATH")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "One-shot scan of a project directory (including node_modules) for HiddenSpawn-family shapes: 4+ \\uXXXX identifier escapes, a multi-kilobyte packed IIFE appended as the last line of any JS-family file (not just *.config.*), and font/image bytes whose magic is JavaScript (the fa-solid-400.woff2 delivery vehicle). Exits non-zero if anything was flagged, so it composes with CI/pre-commit tooling"
+    )]
     scan_deps: Option<PathBuf>,
 
     #[arg(
@@ -46,17 +32,17 @@ struct Args {
     )]
     fix: bool,
 
-    /// One-shot Windows posture audit: portproxy rules, exposed debugger/admin
-    /// listeners, inbound firewall allows, SYSTEM tasks and services with
-    /// missing or non-admin-writable binaries, Defender state, root certs, hosts
-    /// file, local admins, plaintext credential files and autoruns. Exits
-    /// non-zero if any Critical finding exists.
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "One-shot Windows posture audit: portproxy rules, exposed debugger/admin listeners, inbound firewall allows, SYSTEM tasks and services with missing or non-admin-writable binaries, Defender state, root certs, hosts file, local admins, plaintext credential files and autoruns. Exits non-zero if any Critical finding exists"
+    )]
     audit: bool,
 
-    /// With --audit: list every finding including Info and lift the per-category
-    /// line cap.
-    #[arg(long, requires = "audit")]
+    #[arg(
+        long,
+        requires = "audit",
+        help = "With --audit: list every finding including Info and lift the per-category line cap"
+    )]
     audit_all: bool,
     #[arg(
         long,
@@ -74,6 +60,10 @@ struct Args {
     )]
     sysmon_config: Option<Option<PathBuf>>,
 }
+
+const PREVIEW_ONLY: bool = false;
+const APPLY_CHANGES: bool = true;
+const SHUTDOWN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 fn main() {
     let args = Args::parse();
@@ -103,14 +93,11 @@ fn main() {
         }
         let alerts = AlertSink::new(initial_cfg.log_path.clone());
         let flagged = scan_js::scan_project(root, &alerts) + scan_repo::scan_tree(root, &alerts);
-        // --fix is opt-in and separate from --scan-deps' own default
-        // behavior above -- with --scan-deps alone, nothing past this point
-        // runs at all.
         if args.fix {
-            scan_js::remediate_project(root, &alerts, false);
-            repo_fix::remediate_tree(root, &alerts, false);
-            scan_js::remediate_project(root, &alerts, true);
-            repo_fix::remediate_tree(root, &alerts, true);
+            scan_js::remediate_project(root, &alerts, PREVIEW_ONLY);
+            repo_fix::remediate_tree(root, &alerts, PREVIEW_ONLY);
+            scan_js::remediate_project(root, &alerts, APPLY_CHANGES);
+            repo_fix::remediate_tree(root, &alerts, APPLY_CHANGES);
         }
         std::process::exit(if flagged > 0 { 1 } else { 0 });
     }
@@ -122,9 +109,6 @@ fn main() {
     let cfg: SharedConfig = Arc::new(RwLock::new(Arc::new(initial_cfg)));
     let overrides_shared: Arc<RwLock<ConfigOverrides>> = Arc::new(RwLock::new(initial_overrides));
 
-    // Alert-triggered response: any Warn/Critical alert naming an app sends
-    // the hidden-unicode-identifier content scan over that app's install
-    // tree. Registered before the watchers start so nothing slips past.
     let response = Arc::new(scan_js::AlertResponse::new());
     {
         let response = response.clone();
@@ -134,11 +118,6 @@ fn main() {
         });
     }
 
-    // Cross-detector correlation: a c2-shaped-process alert and a
-    // backup-sibling/bootstrap-size alert firing within ~60s of each other
-    // are almost certainly the same real compromise -- emit one combined
-    // CONFIRMED-COMPROMISE alert instead of leaving correlation as an
-    // exercise for whoever reads the log later.
     let correlator = Arc::new(correlate::Correlator::new());
     {
         let correlator = correlator.clone();
@@ -263,16 +242,9 @@ fn main() {
     }
 
     while running.load(Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(SHUTDOWN_POLL_INTERVAL);
     }
 
-    // File watcher blocks on its notify channel with no clean interrupt in
-    // this design (notify's mpsc receiver has no timeout variant used
-    // here); the process/persistence/network threads all observe `running`
-    // and exit their own loops promptly. This is a deliberate, bounded
-    // tradeoff -- the process exits regardless via std::process::exit once
-    // every OTHER watcher has wound down, rather than hanging on the one
-    // thread with no portable "stop watching" signal.
     for h in handles {
         let _ = h.join();
     }

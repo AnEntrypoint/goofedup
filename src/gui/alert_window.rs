@@ -49,36 +49,11 @@ const FEED_ID: i32 = 1004;
 
 const FEED_CLASS_NAME: PCWSTR = w!("GoofedupAlertFeed");
 
-// A private-range custom message telling the feed window new data may be
-// available in the History it already holds -- posted from whatever
-// watcher thread AlertSink::emit runs on, handled on the feed window's own
-// message-pump thread. WM_APP (0x8000) is the documented start of the
-// range reserved for private application messages.
 const WM_APP: u32 = 0x8000;
 const WM_GOOFEDUP_NEW_ALERT: u32 = WM_APP + 1;
 
-// The currently-open feed window's HWND, if any -- set right after the
-// feed child window is created and shown, cleared on its own WM_DESTROY.
-// A watcher thread calling notify_new_alert() reads this to know where to
-// PostMessageW; None (no window open) is the common case and is a cheap
-// no-op, not an error.
-//
-// A single slot, deliberately: if a user somehow opens two feed windows at
-// once (no per-window single-instance guard exists), the second one to
-// open overwrites this slot and the first silently reverts to pre-refresh
-// (close-and-reopen-to-see-new-alerts) behavior for the rest of its
-// lifetime -- accepted as a rare, non-corrupting, self-correcting-on-close
-// edge case rather than building multi-window fan-out (a set of HWNDs) for
-// it.
 static OPEN_FEED_HWND: Mutex<Option<isize>> = Mutex::new(None);
 
-/// Called from AlertSink's on_alert callback (a watcher thread) whenever a
-/// new alert lands, regardless of whether the alert window is currently
-/// open. A no-op if it isn't -- PostMessageW to a HWND that no longer
-/// exists (or was never opened) returns FALSE/ERROR_INVALID_WINDOW_HANDLE,
-/// never a crash or a delivery to an unrelated recycled handle, per the
-/// documented Win32 contract, so no extra liveness check is needed beyond
-/// holding the lock briefly to read the slot.
 pub fn notify_new_alert() {
     let hwnd = OPEN_FEED_HWND.lock().ok().and_then(|g| *g);
     if let Some(raw) = hwnd {
@@ -112,8 +87,6 @@ const HEADER_BG: (u8, u8, u8) = (238, 242, 247);
 const HEADER_FG: (u8, u8, u8) = (30, 41, 59);
 const DESCRIPTION_FG: (u8, u8, u8) = (100, 116, 139);
 
-// Solid badge dot fill -- used both for a card's severity indicator and
-// its accent subline text color.
 const CRITICAL_BADGE: (u8, u8, u8) = (220, 38, 38);
 const WARN_BADGE: (u8, u8, u8) = (217, 119, 6);
 const INFO_BADGE: (u8, u8, u8) = (100, 116, 139);
@@ -166,11 +139,6 @@ fn measure_wrapped_text_height(hdc: windows::Win32::Graphics::Gdi::HDC, text: &s
     (rect.bottom - rect.top).max(0)
 }
 
-/// Recomputes every card's position/height from scratch against the given
-/// device context (needed for accurate DT_CALCRECT text measurement) and
-/// viewport width. Deliberately stateless/idempotent -- called on every
-/// paint and every hit-test, never memoized, so it can never go stale
-/// relative to `expanded` (mut-card-hit-test-post-reflow).
 fn compute_card_layout(
     hdc: windows::Win32::Graphics::Gdi::HDC,
     feed: &CardFeedState,
@@ -245,9 +213,6 @@ fn resize_children_to_client_area(hwnd: HWND) {
         let width = rect.right - rect.left;
         let height = rect.bottom - rect.top;
 
-        // The config window's ListView (LIST_ID) is the only remaining
-        // consumer of this branch -- the alert history no longer creates a
-        // ListView or a details pane, it uses FEED_ID below.
         if let Ok(list_hwnd) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, LIST_ID) {
             if !list_hwnd.is_invalid() {
                 let _ = SetWindowPos(list_hwnd, None, 0, 0, width, height, SWP_NOZORDER);
@@ -401,12 +366,6 @@ unsafe fn feed_state(hwnd: HWND) -> Option<&'static mut CardFeedState> {
     }
 }
 
-/// A cheap content fingerprint for deciding whether a fresh grouped_snapshot()
-/// differs from what's currently rendered -- count, plus per-entry category
-/// and either the group's member count or the single entry's message, joined
-/// into one string. Not a full structural comparison, but sufficient to tell
-/// "nothing changed" (skip repaint) from "something changed" (repaint), which
-/// is all a refresh decision needs.
 fn entries_fingerprint(entries: &[GroupedEntry]) -> String {
     let mut out = String::with_capacity(entries.len() * 24);
     for e in entries {
@@ -426,15 +385,6 @@ fn entries_fingerprint(entries: &[GroupedEntry]) -> String {
     out
 }
 
-/// Re-derives the feed's entries from its live History and repaints ONLY if
-/// the content actually changed (mut-realtime-refresh-no-repaint-when-
-/// unchanged). Preserves scroll_offset_y as-is (a byte position, unaffected
-/// by which entries exist) and re-applies expanded=true to whichever new
-/// entries share a GROUP's (category, key) identity with a currently-
-/// expanded entry (mut-realtime-refresh-preserves-scroll-and-expand-state)
-/// -- a Single entry has no identity that survives a refresh, so an
-/// expanded Single may legitimately re-collapse; only grouped cards have a
-/// stable identity to carry forward.
 unsafe fn refresh_feed_from_history(hwnd: HWND) {
     let Some(state) = feed_state(hwnd) else { return };
 
@@ -466,9 +416,6 @@ unsafe fn refresh_feed_from_history(hwnd: HWND) {
     let _ = InvalidateRect(hwnd, None, true);
 }
 
-/// Clamps scroll_offset_y to [0, max(0, total_height - viewport_height)] --
-/// the sole place this clamp is applied, called after every event that can
-/// change either operand (mut-card-scroll-bounds).
 fn clamp_scroll_offset(offset: i32, total_height: i32, viewport_height: i32) -> i32 {
     let max_offset = (total_height - viewport_height).max(0);
     offset.clamp(0, max_offset)
@@ -512,9 +459,8 @@ unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                     let top = layout.card_top_in_unscrolled_content_space[i] - offset;
                     let h = layout.card_height[i];
                     let bottom = top + h;
-                    // mut-card-paint-viewport-clip: skip any card whose rect
-                    // does not intersect the visible client area at all.
-                    if bottom < 0 || top > height {
+                    let card_outside_viewport = bottom < 0 || top > height;
+                    if card_outside_viewport {
                         continue;
                     }
 
@@ -764,11 +710,6 @@ unsafe extern "system" fn feed_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             LRESULT(0)
         }
         WM_DESTROY => {
-            // Clear the shared HWND slot BEFORE freeing state: once cleared,
-            // notify_new_alert() can no longer target this window at all
-            // (its only way to reach it is that slot), so there is no
-            // window where a post could still land after the state below
-            // is freed and the handle potentially recycled.
             if let Ok(mut slot) = OPEN_FEED_HWND.lock() {
                 if *slot == Some(hwnd.0 as isize) {
                     *slot = None;
@@ -887,19 +828,7 @@ fn open_window(title: &str, hinstance: windows::Win32::Foundation::HMODULE) -> R
     Ok((hwnd, hicon))
 }
 
-/// SysListView32 in LVS_REPORT has no direct "set row height" message --
-/// the documented trick (used by every real-world app that needs taller
-/// report-mode rows) is assigning a small-icon imagelist whose item size IS
-/// the desired row height; report mode measures rows against that
-/// imagelist's cy even when no per-row icon is ever actually drawn (this
-/// window's rows are owner-drawn, so the icon slot itself stays visually
-/// empty). Zero initial images (cinitial=0) keeps this a pure sizing hack
-/// with no icon content. The imagelist is intentionally leaked to the OS
-/// image-list cache for the process lifetime rather than tracked/destroyed
-/// -- it holds no GDI bitmap resources of consequence (0 images, comctl32
-/// manages it internally) and this window is opened at most a handful of
-/// times per process run, not in a hot loop.
-fn set_report_row_height(list_hwnd: HWND, desired_row_height_px: i32) {
+fn set_report_row_height_via_small_icon_imagelist(list_hwnd: HWND, desired_row_height_px: i32) {
     unsafe {
         let himl = ImageList_Create(1, desired_row_height_px, ILC_COLOR32, 0, 1);
         if !himl.is_invalid() {
@@ -1058,19 +987,6 @@ fn create_alert_window_and_pump(
         }
 
         register_feed_class_once(hinstance);
-        // Deliberately created WITHOUT WS_VISIBLE: a visible child window
-        // can receive WM_PAINT synchronously from inside CreateWindowExW
-        // itself, before this function returns -- if that happens before
-        // GWLP_USERDATA is attached below, feed_state() reads null and that
-        // first paint silently renders an empty background with no cards
-        // and no scrollbar range, and nothing later forces a second paint
-        // to correct it. Live-witnessed: this was the actual cause of
-        // scrollbar_range_nonzero_for_60_entries and every scroll-dependent
-        // check failing in the one-shot witness even after forcing repaints
-        // from the witness side -- the state was never attached in time for
-        // ANY paint the witness could trigger. Creating hidden, attaching
-        // state, THEN showing (which itself queues a fresh WM_PAINT with
-        // state already present) closes this ordering hole entirely.
         let feed_hwnd = unsafe {
             CreateWindowExW(
                 Default::default(),
@@ -1093,12 +1009,6 @@ fn create_alert_window_and_pump(
             return;
         };
 
-        // The card feed's own base/bold fonts are owned and freed by the
-        // FEED child window's WM_DESTROY (feed_wnd_proc), NOT by the outer
-        // window's WM_DESTROY -- the outer WindowState below intentionally
-        // holds DEFAULT (invalid) font handles for this branch so the outer
-        // cleanup's DeleteObject calls no-op instead of double-freeing the
-        // same HFONTs the feed window already owns.
         let feed_bold_font = readable_font(hwnd, BASE_FONT_POINT_SIZE, true);
         let expanded_len = entries.len();
         let feed = CardFeedState {
@@ -1213,7 +1123,7 @@ fn create_config_window_and_pump(
             LPARAM((LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES) as isize),
         );
         SendMessageW(list_hwnd, WM_SETFONT, WPARAM(base_font.0 as usize), LPARAM(1));
-        set_report_row_height(list_hwnd, ROW_HEIGHT_PX);
+        set_report_row_height_via_small_icon_imagelist(list_hwnd, ROW_HEIGHT_PX);
     }
 
     insert_column(list_hwnd, 0, "Setting", 300);

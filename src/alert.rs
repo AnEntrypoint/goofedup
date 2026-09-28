@@ -1,8 +1,3 @@
-// Single alert channel every detector writes through. Alert-only by design:
-// no detector in this codebase kills a process, deletes a file, or blocks a
-// connection, and none of them prescribes what to do about it either -- the
-// job here is reporting what looks suspicious, not deciding a remedy.
-
 use chrono::Local;
 use std::fmt;
 use std::fs::OpenOptions;
@@ -10,13 +5,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-/// Every lock in this module guards a plain data structure (an Option, a
-/// unit "are we mid-write" token) with no user code running while it is
-/// held, except the registered GUI callback in `emit` -- if that callback
-/// ever panicked it must not take every future alert down with it via a
-/// poisoned mutex, since a dropped notification is a real, named degraded
-/// behavior but a watcher thread that can no longer emit alerts at all is
-/// the actual failure this tool exists to catch.
 fn lock_recovering<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -60,22 +48,14 @@ impl AlertSink {
         }
     }
 
-    /// Registers a callback invoked with every emitted Alert, in addition to
-    /// the existing console+file output -- the GUI's toast/history hook and
-    /// the scan_js alert-response hook. More than one consumer may register.
     pub fn add_on_alert(&self, cb: impl Fn(&Alert) + Send + Sync + 'static) {
         lock_recovering(&self.on_alert).push(Arc::new(cb));
     }
 
     pub fn emit(&self, a: Alert) {
-        // Clone the Arcs and drop the on_alert lock before invoking the
-        // callbacks -- calling out to arbitrary code (which may itself call
-        // back into emit, the real shape once the GUI's own alerting paths
-        // grow) while still holding this lock is a same-thread self-deadlock
-        // on a non-reentrant Mutex, witnessed live via a nested-emit probe.
-        let cbs = lock_recovering(&self.on_alert).clone();
-        for cb in &cbs {
-            cb(&a);
+        let callbacks_snapshot = lock_recovering(&self.on_alert).clone();
+        for callback in &callbacks_snapshot {
+            callback(&a);
         }
         let _guard = lock_recovering(&self.lock);
         let ts = Local::now().format("%Y-%m-%d %H:%M:%S");

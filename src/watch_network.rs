@@ -1,10 +1,3 @@
-// Network watcher: per-process outbound connection visibility + scan
-// detection + firewall-state drift, all via polling (no portable
-// cross-platform push API for socket events without a per-OS raw-packet
-// capture dependency, which "be our firewall, alert only" doesn't need --
-// visibility into what a process is CONNECTING to is enough to suggest a
-// block, no packet capture required).
-
 use crate::alert::AlertSink;
 use crate::config::SharedConfig;
 use std::collections::{HashMap, HashSet};
@@ -27,12 +20,8 @@ struct ProcWindow {
     alerted: bool,
 }
 
-/// A live-witnessed false-positive floor: ordinary browser page-loads open
-/// many same-port connections to distinct hosts (a real recorded case hit
-/// distinct_hosts=15 with distinct_ports=1). A host-count-driven alert only
-/// fires once port variety clears this floor too, since real host sweeping
-/// (scanning a subnet) commonly touches more than one or two services.
 const HOST_SWEEP_MIN_PORT_VARIETY: usize = 3;
+const FIREWALL_POLL_INTERVAL_MULTIPLIER: u64 = 5;
 
 pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     {
@@ -78,27 +67,6 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
             w.ports.insert(c.remote_port);
             w.hosts.insert(c.remote_ip.clone());
 
-            // Real port/host scanning varies both dimensions: probing many
-            // services means many distinct ports, and sweeping a subnet
-            // means many distinct hosts, usually together. Ordinary web
-            // browsing is the opposite shape -- host-diverse but port-narrow
-            // (one page load opens connections to a dozen+ CDN/ad/analytics
-            // hosts, all on port 443) -- so distinct_hosts alone, with
-            // distinct_ports still at baseline, is not scan-shaped and must
-            // not trigger on its own. A real port scan (many ports against
-            // few hosts) still triggers on the port threshold alone; a real
-            // host sweep only counts once it also shows some port variety,
-            // not just "many HTTPS connections."
-            // A known high-throughput/high-fanout tool (same list the
-            // read-burst detector uses -- browsers, sync engines) gets its
-            // host-sweep floor raised the same way its read-burst floor
-            // is: live-witnessed even after the general 15->40 fix,
-            // chrome.exe alone kept clearing 40 with a heavy page/session
-            // (46-69 distinct hosts, always just 2-3 ports, 4 hits in
-            // ~11 hours, zero non-browser hits in the same window) -- a
-            // real subnet sweep still clears this raised bar easily, since
-            // it needs far more than a browser's own CDN/ad/analytics
-            // fanout to look like scanning.
             let is_known_high_throughput_tool = cfg
                 .known_high_throughput_tool_names
                 .iter()
@@ -131,11 +99,6 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
             }
 
             if is_new {
-                // Every genuinely new outbound destination gets logged at
-                // INFO for later correlation -- not every connection is
-                // suspicious, but a full record makes "what did this
-                // process talk to" answerable after the fact without a
-                // packet capture running the whole time.
                 alerts.info(
                     "network-connection",
                     format!(
@@ -161,7 +124,7 @@ pub fn run_firewall_drift(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, runn
             "firewall-drift",
             format!(
                 "polling firewall state every {}s -- baseline: {}",
-                cfg.poll_interval_secs * 5,
+                cfg.poll_interval_secs * FIREWALL_POLL_INTERVAL_MULTIPLIER,
                 last_state
                     .iter()
                     .map(|(k, v)| format!("{k}={v}"))
@@ -173,7 +136,7 @@ pub fn run_firewall_drift(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, runn
 
     while running.load(Ordering::Relaxed) {
         let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-        std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs * 5));
+        std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs * FIREWALL_POLL_INTERVAL_MULTIPLIER));
         for (name, enabled) in firewall_profile_state() {
             if let Some(prev) = last_state.get(&name) {
                 if *prev && !enabled {
@@ -233,18 +196,9 @@ mod windows_impl {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
-    // Windows allocates a fresh visible console window for any
-    // console-subsystem child process spawned by a process that has none of
-    // its own (goofedup-gui.exe is windows_subsystem=windows) unless this
-    // flag is passed to CreateProcess -- every Command::new in this module
-    // needs it or the tray GUI flashes a console on each poll.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     pub fn list_connections() -> Vec<Connection> {
-        // netstat -ano is the pragmatic cross-version-Windows choice here
-        // over raw GetExtendedTcpTable FFI -- same data, zero unsafe code,
-        // and this runs on a multi-second poll interval so process-spawn
-        // overhead is a non-issue.
         let mut out = Vec::new();
         let Ok(o) = Command::new("netstat").args(["-ano", "-p", "TCP"]).creation_flags(CREATE_NO_WINDOW).output() else {
             return out;
@@ -284,10 +238,6 @@ mod windows_impl {
     }
 
     fn pid_name_map() -> std::collections::HashMap<u32, String> {
-        // sysinfo::System is already a dependency (see watch_process.rs) and
-        // gives pid->name natively, eliminating the tasklist.exe shell-out
-        // and its console-flash risk entirely rather than just suppressing
-        // the window.
         let sys = sysinfo::System::new_all();
         sys.processes()
             .iter()
@@ -387,9 +337,6 @@ mod unix_impl {
 
     #[cfg(target_os = "linux")]
     pub fn list_connections_proc() -> Vec<Connection> {
-        // /proc/net/tcp is the zero-dependency native source on Linux --
-        // hex-encoded local/remote address:port pairs, inode-linked back to
-        // a PID via /proc/<pid>/fd symlinks.
         let mut out = Vec::new();
         let Ok(tcp) = std::fs::read_to_string("/proc/net/tcp") else {
             return out;
@@ -435,14 +382,14 @@ mod unix_impl {
     #[cfg(target_os = "linux")]
     fn parse_proc_net_tcp(text: &str) -> std::collections::HashMap<String, (String, u16)> {
         let mut map = std::collections::HashMap::new();
+        const TCP_STATE_ESTABLISHED_HEX: &str = "01";
         for line in text.lines().skip(1) {
             let fields: Vec<&str> = line.split_whitespace().collect();
             if fields.len() < 10 {
                 continue;
             }
             let state = fields[3];
-            if state != "01" {
-                // 01 = ESTABLISHED
+            if state != TCP_STATE_ESTABLISHED_HEX {
                 continue;
             }
             let remote = fields[2];
@@ -502,11 +449,10 @@ mod unix_impl {
                 }
             }
         }
-        // No ufw -- fall back to checking whether the kernel netfilter
-        // table has any rules at all as a coarse signal.
+        const IPTABLES_EMPTY_CHAIN_HEADER_LINES: usize = 8;
         if let Ok(o) = Command::new("iptables").args(["-L", "-n"]).output() {
             if let Ok(text) = String::from_utf8(o.stdout) {
-                let has_rules = text.lines().count() > 8; // more than just the default empty-chain headers
+                let has_rules = text.lines().count() > IPTABLES_EMPTY_CHAIN_HEADER_LINES;
                 out.push(("iptables".to_string(), has_rules));
             }
         }

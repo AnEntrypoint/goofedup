@@ -1,11 +1,3 @@
-// Process watcher: cross-platform via `sysinfo` polling. A push-based native
-// API (WMI process-creation events on Windows, kqueue EVFILT_PROC on macOS,
-// netlink proc connector on Linux) would be lower-latency, but each is a
-// separate per-OS implementation for a modest win over a short poll
-// interval -- polling every few seconds via one cross-platform crate is the
-// pragmatic tradeoff for a tool that has to build and run identically on
-// three OSes from one codebase.
-
 use crate::alert::AlertSink;
 use crate::config::{Config, SharedConfig};
 use crate::heuristics::{decode_encoded_command, is_denied_exec_path, is_unlisted_exec_path, score_command_line, score_process_name};
@@ -16,31 +8,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use sysinfo::{Pid, System};
 
-/// Per-process read-rate tracking state for the file-read-burst (mass
-/// scanning / harvesting) detector below.
+const CMDLINE_EVIDENCE_HEAD_CHARS: usize = 1200;
+const DECODED_COMMAND_EVIDENCE_HEAD_CHARS: usize = 300;
+const ANCESTOR_WALK_MAX_DEPTH: u32 = 4;
+
 struct ReadTracker {
     last_total_read: u64,
-    /// Running average of the per-poll read delta, EMA-smoothed so one
-    /// legitimate burst (a real build, a real backup job starting) doesn't
-    /// permanently poison the baseline as "normal" nor get immediately
-    /// re-flagged as a fresh burst on the very next poll.
     avg_delta: f64,
     alerted_this_burst: bool,
-    /// How many of the last `window_size` polls (a fixed-size sliding
-    /// window, not strict back-to-back consecutiveness) scored as a
-    /// relative spike -- see Config::read_burst_window_size's own doc
-    /// comment for the full rationale. Sized at construction from that
-    /// config field rather than a const-generic array length, since the
-    /// window size is now runtime-tunable: a Vec costs one allocation per
-    /// newly-tracked PID (cached across polls in the caller's
-    /// HashMap<Pid, ReadTracker>), not per poll.
     relative_spike_window: Vec<bool>,
-    /// Same windowed-persistence requirement as relative_spike_window, but
-    /// for the absolute-burst path. Live-witnessed: this path originally
-    /// had no baseline/persistence gating at all, so a legitimate dev tool
-    /// loading a large plugin file on a single poll (agentplug-runner.exe
-    /// reading hundreds of MB of WASM) alerted immediately every time,
-    /// bypassing the relative path's persistence fix entirely.
     absolute_burst_window: Vec<bool>,
     window_pos: usize,
 }
@@ -72,9 +48,17 @@ impl ReadTracker {
     }
 }
 
+fn config_snapshot(cfg_shared: &SharedConfig) -> Arc<Config> {
+    cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+fn fresh_system_snapshot() -> System {
+    System::new_all()
+}
+
 pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
     {
-        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let cfg = config_snapshot(&cfg_shared);
         alerts.info(
             "process",
             format!(
@@ -96,33 +80,15 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
     let mut warned_unlisted_paths: HashSet<String> = HashSet::new();
     let mut trust_watch = ProcessTrust::new();
 
-    // A fresh System::new_all() is built EVERY poll cycle rather than reused
-    // via refresh_processes on one long-lived instance -- a real bug hit and
-    // fixed while building this: on Windows, sysinfo 0.33's
-    // refresh_processes(All, ...) on an already-populated System silently
-    // drops each process's cmd() on the SECOND and later refreshes (single
-    // fresh System::new_all() + one refresh returns it correctly; reusing
-    // the instance across repeated refresh calls returns an empty Vec from
-    // the second call onward). Live-witnessed via a real spawned node
-    // process and a real repeated-refresh reproduction before landing this
-    // fix -- see tests/live_process_watch.rs. The command line is this
-    // watcher's primary signal (the C2-shape heuristic reads it), so
-    // silently losing it defeats the whole detector; the extra per-poll
-    // enumeration cost is the correct tradeoff at a multi-second interval.
     let mut known: HashSet<Pid> = {
-        let sys = System::new_all();
+        let sys = fresh_system_snapshot();
         sys.processes().keys().copied().collect()
     };
 
     while running.load(Ordering::Relaxed) {
-        // Cloned once per iteration (a cheap Arc refcount bump), never
-        // cached across iterations -- every cfg.* read below sees a single
-        // consistent snapshot for this whole poll, and a config reload
-        // between iterations takes effect on the very next one with no
-        // further changes needed anywhere in this loop body.
-        let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        let cfg = config_snapshot(&cfg_shared);
         std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs));
-        let sys = System::new_all();
+        let sys = fresh_system_snapshot();
 
         let current: HashSet<Pid> = sys.processes().keys().copied().collect();
         for pid in current.difference(&known) {
@@ -132,10 +98,6 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
         }
         trust_watch.observe(&cfg, &alerts, &sys, &known, &current);
 
-        // Runs against EVERY currently-running process, not just newly
-        // spawned ones -- a mass-scanning process may already have been
-        // running when goofedup started, or may sit quiet for a while
-        // before its scan begins.
         for (pid, p) in sys.processes() {
             check_read_burst(&cfg, &alerts, *pid, p, &mut read_trackers);
         }
@@ -145,24 +107,15 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
     }
 }
 
-/// Linux's sysinfo disk_usage() surfaces /proc/[pid]/io's `read_bytes`,
-/// which counts actual block-device I/O only -- reads served from page
-/// cache or tmpfs (the common case for a container/VM with warm cache, or
-/// for a scanning process re-reading recently-touched files) report 0
-/// there and the detector never trips. `rchar` counts every byte passed to
-/// read()-family syscalls regardless of cache, which is what a mass
-/// scanning/harvesting process actually produces -- read directly since
-/// sysinfo's DiskUsage does not expose it. Live-witnessed: this container's
-/// own /proc/self/io reports read_bytes=0 for a real page-cache-served
-/// read.
 #[cfg(target_os = "linux")]
 fn total_read_bytes(pid: Pid) -> u64 {
+    const PROC_IO_CHARS_READ_PREFIX: &str = "rchar:";
     let path = format!("/proc/{}/io", pid.as_u32());
     let Ok(contents) = std::fs::read_to_string(path) else {
         return 0;
     };
     for line in contents.lines() {
-        if let Some(rest) = line.strip_prefix("rchar:") {
+        if let Some(rest) = line.strip_prefix(PROC_IO_CHARS_READ_PREFIX) {
             return rest.trim().parse().unwrap_or(0);
         }
     }
@@ -174,9 +127,6 @@ fn total_read_bytes(_pid: Pid, p: &sysinfo::Process) -> u64 {
     p.disk_usage().total_read_bytes
 }
 
-/// Mass file-read (drive scanning / harvesting) detection -- see Config's
-/// own doc comment for the two independent triggers (absolute burst,
-/// relative spike vs a process's own EMA baseline).
 fn check_read_burst(
     cfg: &Config,
     alerts: &AlertSink,
@@ -193,23 +143,10 @@ fn check_read_burst(
         .entry(pid)
         .or_insert_with(|| ReadTracker::new(total_read, cfg.read_burst_window_size));
 
-    // A process's disk_usage() can wrap or reset (e.g. genuinely restarted
-    // under the same PID between polls on some platforms) -- treat a
-    // decrease as "no delta this poll" rather than an underflow panic or a
-    // bogus huge unsigned delta.
     let delta = total_read.saturating_sub(tracker.last_total_read);
     tracker.last_total_read = total_read;
 
     if delta == 0 {
-        // Record a non-spike poll into the window rather than wiping the
-        // tracker's whole history -- a real process's read rounds are
-        // often separated by an intervening near-zero-delta poll (bursty
-        // disk I/O, not perfectly uniform), live-witnessed via
-        // _diag_syncthing_deltas.rs: a strict "any zero-delta poll erases
-        // all prior progress" rule meant a real sustained multi-round
-        // burst pattern never accumulated past a single spike, since each
-        // round's own inter-round pause produced an intervening zero-delta
-        // poll that reset the count every time.
         tracker.record_poll(false, false);
         if tracker.relative_spike_count_in_window() < cfg.read_burst_required_spikes_in_window
             && tracker.absolute_burst_count_in_window() < cfg.read_burst_required_spikes_in_window
@@ -223,16 +160,6 @@ fn check_read_burst(
     let name_lower = name.to_lowercase();
     let is_known_high_throughput_tool =
         cfg.known_high_throughput_tool_names.iter().any(|n| n.to_lowercase() == name_lower);
-    // A name-independent trust signal alongside the name list above: a
-    // binary actually running from an OS/vendor root (Program Files,
-    // C:\Windows, /usr, /System, ...) is not a plausible drive-harvester
-    // regardless of what it's called, since planting a file there requires
-    // elevation a compromise doesn't grant for free -- covers a legitimate
-    // vendor tool's bulk I/O (an archiver, an IDE indexing a workspace, a
-    // COM surrogate) without enumerating its name first. See
-    // Config::os_vendor_roots' own doc comment for the live-witnessed
-    // false positives (tar.exe, Code.exe, dllhost.exe) that share no
-    // property except this one.
     let exe_path_lower = p.exe().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let runs_from_os_vendor_root = !exe_path_lower.is_empty()
         && cfg.os_vendor_roots.iter().any(|root| {
@@ -240,42 +167,18 @@ fn check_read_burst(
             !root_str.is_empty() && exe_path_lower.starts_with(&root_str)
         });
     let gets_high_throughput_relaxation = is_known_high_throughput_tool || runs_from_os_vendor_root;
-    // Trust (name or path) raises the bar but never removes it -- capped at
-    // file_read_burst_uncorroborated_ceiling_bytes regardless of the
-    // multiplier, since trust answers "is this a legitimate BINARY," never
-    // "is this the actor actually running it" (the same principle already
-    // applied to c2-shaped-process severity: see that detector's own
-    // comment on why a known-looking parent never suppresses an alert). A
-    // relaxed floor that could exceed the ceiling would let a sufficiently
-    // trusted-looking process buy unlimited exfiltration headroom.
     let effective_absolute_threshold = if gets_high_throughput_relaxation {
         ((cfg.file_read_burst_absolute_bytes_per_poll as f64 * cfg.known_high_throughput_tool_multiplier) as u64)
             .min(cfg.file_read_burst_uncorroborated_ceiling_bytes)
     } else {
         cfg.file_read_burst_absolute_bytes_per_poll
     };
-    // Same relaxation applied to the relative-spike path: a browser or sync
-    // engine legitimately swings hard against its own quiet-tab baseline
-    // (live-witnessed: chrome/firefox/Discord all recorded 8-15x spikes
-    // during ordinary page loads), so a known high-throughput name must
-    // clear a proportionally higher multiple of its own average too.
     let effective_relative_multiplier = if gets_high_throughput_relaxation {
         cfg.file_read_burst_relative_multiplier * cfg.known_high_throughput_tool_multiplier
     } else {
         cfg.file_read_burst_relative_multiplier
     };
 
-    // Corroboration: a process ALSO running from a denied or unlisted exec
-    // path (reusing the exact same checks the process-path detector itself
-    // applies -- not a new signal, a cross-reference of an existing one) is
-    // far stronger evidence than read volume alone, so it clears the
-    // absolute floor at a fraction of the normal bar. This is the
-    // volume-alone false-positive class's actual fix: 223 CRITICALs in one
-    // operating log, all from well-located, ordinarily-installed dev tools
-    // with no other red flag -- corroboration lets a genuinely suspicious
-    // combination (unusual location AND a large read) still alert well
-    // below the raised floor, while volume by itself must clear the much
-    // higher bar above.
     let exe_path_raw = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let path_is_corroborating = is_denied_exec_path(&exe_path_raw, &cfg.deny_exec_path_fragments).is_some()
         || is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots);
@@ -285,41 +188,12 @@ fn check_read_burst(
         effective_absolute_threshold
     };
 
-    // Live-witnessed: a process whose own baseline is already substantial
-    // (python.exe reading 60MB against a 13-24MB/poll established average)
-    // is not anomalous relative to ITSELF just because the raw byte count
-    // clears the absolute floor -- the absolute check exists to catch a
-    // scanner even on its very first observation (no baseline yet), not to
-    // re-flag a consistently high-throughput process on every poll near its
-    // own normal level. A read within a modest multiple of the process's
-    // own established baseline is excluded from the absolute-burst check
-    // even if it clears the raw threshold.
     let absolute_reading_is_within_own_established_baseline = tracker.avg_delta > 0.0
         && (delta as f64) < tracker.avg_delta * cfg.read_burst_baseline_exemption_multiplier;
 
     let single_poll_absolute_burst = delta >= effective_absolute_threshold
         && !absolute_reading_is_within_own_established_baseline;
 
-    // A live-witnessed false-positive source: a low EMA baseline built up
-    // during a genuinely quiet stretch (an idle browser tab) makes any
-    // ordinary burst of real activity look like a huge relative spike.
-    // BASELINE_WARM_UP_FLOOR requires the baseline itself to already
-    // reflect a meaningful amount of steady-state activity before the
-    // relative check even engages, not just "greater than noise."
-    // The relative-spike path multiplies a PROCESS'S OWN baseline, which for
-    // a trusted (name/vendor-root) tool with a modest established average
-    // can demand far less than file_read_burst_uncorroborated_ceiling_bytes
-    // to trip -- live-witnessed: grep.exe (Program Files\Git, vendor-root
-    // trusted) at a 1.1MB baseline only needed 128x (8x base * 16x
-    // relaxation) = ~141MB to fire, and a real grep run over a sizeable repo
-    // clears that trivially (484MB observed) while still being nowhere near
-    // genuinely extreme. The absolute path's own uncorroborated-ceiling cap
-    // (see effective_absolute_threshold above) closes exactly this gap for
-    // raw volume; the relative path needs the identical cap, or trust that
-    // survives the absolute fix remains fully exploitable through the
-    // multiplier math alone. An uncorroborated trusted process's relative
-    // spike must still clear the same absolute ceiling in raw bytes, not
-    // just the multiple of its own baseline.
     let relative_spike_needs_ceiling_check = gets_high_throughput_relaxation && !path_is_corroborating;
     let single_poll_relative_spike = tracker.avg_delta > cfg.read_burst_baseline_warm_up_floor_bytes
         && (delta as f64) >= tracker.avg_delta * effective_relative_multiplier
@@ -328,18 +202,6 @@ fn check_read_burst(
 
     tracker.record_poll(single_poll_relative_spike, single_poll_absolute_burst);
 
-    // A real drive-scanning/harvesting process sustains its elevated read
-    // rate across a short window; a legitimate app's burst (page load,
-    // cache write, update check, a dev tool loading a large plugin file)
-    // is characteristically one-shot. Requiring the spike to recur within
-    // the last WINDOW_SIZE polls -- not a single sample, and not requiring
-    // strict zero-gap consecutiveness -- is what actually distinguishes the
-    // two shapes, live-witnessed against real recorded firefox.exe/
-    // Discord.exe/agentplug-runner.exe/python.exe false positives (all
-    // single-poll) while a genuine multi-round sustained burst (even with
-    // an intervening quiet poll between rounds) still trips this. The
-    // absolute path originally had no persistence requirement at all,
-    // completely bypassing this protection -- both paths now require it.
     let is_relative_spike = tracker.relative_spike_count_in_window() >= cfg.read_burst_required_spikes_in_window;
     let is_absolute_burst = tracker.absolute_burst_count_in_window() >= cfg.read_burst_required_spikes_in_window;
 
@@ -371,18 +233,6 @@ fn check_read_burst(
         tracker.alerted_this_burst = false;
     }
 
-    // EMA update AFTER scoring this poll -- a burst this poll must be
-    // compared against the baseline BEFORE the burst itself pulls the
-    // average up. A poll that itself scored as a spike (single-poll or
-    // absolute) is excluded from the update entirely, not just deferred:
-    // otherwise a SUSTAINED scan launders its own elevated read rate into
-    // the baseline within 1-2 polls (live-witnessed: a real 3.6MB burst
-    // pulled a ~150KB baseline up to ~700KB in two polls, so a second
-    // identical 3.6MB burst right after no longer cleared the relative
-    // threshold against its own inflated average) -- the baseline must stay
-    // anchored to genuine steady-state activity for as long as the scan
-    // itself continues, or a sustained scan becomes progressively HARDER to
-    // detect the longer it runs, the opposite of the intended behavior.
     if !single_poll_relative_spike && !single_poll_absolute_burst {
         tracker.avg_delta = if tracker.avg_delta == 0.0 {
             delta as f64
@@ -427,7 +277,6 @@ fn inspect_new_process(
         .join(" ");
     let pid = p.pid().as_u32();
 
-    // 1. denied path -- instant CRITICAL regardless of process name.
     if !exe_path.is_empty() {
         if let Some(reason) = is_denied_exec_path(&exe_path, &cfg.deny_exec_path_fragments) {
             alerts.critical(
@@ -436,17 +285,6 @@ fn inspect_new_process(
                 format!("exe={exe_path} ({reason})"),
             );
         } else if !process_trust::supersedes_path_allowlist(cfg) && is_unlisted_exec_path(&exe_path, &cfg.allowed_exec_roots) {
-            // The allowlist check itself stays exactly as sensitive as
-            // before -- a system-wide install location or a user's own
-            // tooling directory can still hold a compromised binary, so
-            // WHICH paths get flagged never changes here. What changes is
-            // re-alert volume: the SAME already-flagged path launching
-            // again (e.g. a system Python interpreter invoked many times a
-            // day) is not new information the second time, so it alerts
-            // once per exact exe path per session run rather than once per
-            // process launch. In-memory only -- a fresh session still
-            // re-flags every path from scratch, since a path's trust
-            // status could genuinely have changed since last run.
             if warned_unlisted_paths.insert(exe_path.clone()) {
                 alerts.warn(
                     "process-path",
@@ -457,7 +295,6 @@ fn inspect_new_process(
         }
     }
 
-    // 2. masquerading name / suspicious characters.
     if let Some(v) = score_process_name(&name, &exe_path) {
         alerts.critical(
             "process-name",
@@ -466,17 +303,6 @@ fn inspect_new_process(
         );
     }
 
-    // 3. obfuscated inline-eval command line, only for watched interpreters
-    //    (avoids false-positiving on e.g. a long git commit message passed
-    //    as an argument to something unrelated).
-    //
-    // On Linux, sysinfo's p.name() is /proc/[pid]/comm -- for a
-    // multi-threaded interpreter like node this is the per-thread name
-    // (MainThread, V8Worker, ...), NOT the binary name, even for the PID
-    // that IS the process itself. Matching against the exe basename too
-    // catches the real interpreter regardless of what comm reports.
-    // Live-witnessed: a real spawned `node -e <payload>` never matched on
-    // name alone in this container.
     let name_lower = name.to_lowercase();
     let exe_basename_lower = std::path::Path::new(&exe_path)
         .file_name()
@@ -488,41 +314,9 @@ fn inspect_new_process(
     });
     if is_watched_interp {
         if let Some(v) = score_command_line(&cmdline, cfg.c2_max_decode_depth) {
-            // 200 chars was long enough to show an -EncodedCommand wrapper's
-            // own base64 head, but for a PLAIN inline script (`node -e
-            // "<source>"`, no encoding at all) it shows nothing past the
-            // interpreter invocation itself -- live-witnessed: a
-            // c2-shaped-process alert on a bare `node.exe -e` with no
-            // decoded_head available (not an encoded-command shape) left no
-            // way to tell a real payload from a benign automation script
-            // without waiting to catch the process alive. 1200 chars covers
-            // the actual scored content for the large majority of real
-            // one-liners this project has captured this session.
-            let head: String = cmdline.chars().take(1200).collect();
-            // When the command decoded (an -EncodedCommand/-enc/nested
-            // $EncodedCommand shape that score_command_line actually
-            // scored the DECODED content of, per its own doc comment),
-            // include a prefix of what it decoded to directly in the
-            // evidence -- ground truth for the next investigation instead
-            // of guessing at the real structure from a 200-char raw-cmdline
-            // prefix, which is what the wrapper's own base64 head shows and
-            // is useless for seeing what the command actually does.
+            let head: String = cmdline.chars().take(CMDLINE_EVIDENCE_HEAD_CHARS).collect();
             let decoded_head = decode_encoded_command(&cmdline, cfg.c2_max_decode_depth)
-                .map(|d| d.chars().take(300).collect::<String>());
-            // Severity stays CRITICAL unconditionally -- a c2-shaped command
-            // line is a severe signal regardless of who spawned it, since a
-            // real compromise could just as easily run under a parent name
-            // that happens to match a trusted dispatcher. Live-confirmed:
-            // a real Discord-bootstrap-hijack C2 loader (fileless XOR-coded
-            // payload fetched from a hardcoded IP, self-tagged
-            // "app-discord-eval") fired under parent=recognized-dev-tool-
-            // ancestor on its very first hit -- a downgrade here would have
-            // muted the real incident this tool exists to catch. Ancestry is
-            // still useful triage context, so it's appended to the evidence
-            // text instead of ever changing severity: a known name is not
-            // the same as a trusted actor, and the alert must never be
-            // quieter for a payload that merely looks like it came from a
-            // familiar process.
+                .map(|d| d.chars().take(DECODED_COMMAND_EVIDENCE_HEAD_CHARS).collect::<String>());
             let ancestors = ancestor_names(sys, p, ANCESTOR_WALK_MAX_DEPTH);
             let parent_is_known_automation = ancestors.iter().any(|ancestor| {
                 let ancestor_lower = ancestor.to_lowercase();
@@ -533,13 +327,6 @@ fn inspect_new_process(
             } else {
                 "parent=unrecognized"
             };
-            // Full ancestor chain (immediate parent first), not just the
-            // known/unrecognized verdict -- live-witnessed gap: with only
-            // the verdict recorded, a real C2 hit's actual triggering
-            // process (what launched the node -e payload) was unrecoverable
-            // from the alert log after the ephemeral payload process itself
-            // had already exited, making the reinfection vector impossible
-            // to trace after the fact.
             let ancestor_chain = if ancestors.is_empty() {
                 String::new()
             } else {
@@ -558,16 +345,6 @@ fn inspect_new_process(
         }
     }
 }
-
-// A live-witnessed real dispatch chain (this session's own AI-assistant
-// tool-dispatch path) is bash.exe (nested 3 deep) <- claude.exe <- cmd.exe
-// <- explorer.exe -- the immediate parent of a flagged interpreter is
-// routinely an intermediate shell, not a directly-trusted top-level
-// dispatcher, so checking only p.parent() (one level) almost never matches.
-// Walk a small bounded number of ancestor levels instead; the bound exists
-// so this stays cheap per-alert regardless of process-tree depth, not
-// because a real Windows process tree could cycle.
-const ANCESTOR_WALK_MAX_DEPTH: u32 = 4;
 
 fn ancestor_names(sys: &System, p: &sysinfo::Process, max_depth: u32) -> Vec<String> {
     let mut names = Vec::new();

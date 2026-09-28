@@ -1,7 +1,3 @@
-// File watcher: native OS filesystem-change events on all three platforms
-// via the `notify` crate (ReadDirectoryChangesW on Windows, FSEvents on
-// macOS, inotify on Linux) -- genuinely event-driven, no polling.
-
 use crate::alert::AlertSink;
 use crate::config::{Config, SharedConfig};
 use crate::heuristics::is_backup_sibling_name;
@@ -12,11 +8,6 @@ use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// Script-file extensions worth baselining. Not tied to any one app/runtime
-/// -- covers the interpreted-language entry-point shape a "small bootstrap
-/// file overwritten with a huge payload" attack needs (compiled binaries
-/// don't fit this exact tell the same way; a giant .exe growing is a
-/// different, much noisier signal not worth tracking the same way here).
 fn is_watched_script_ext(path: &std::path::Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
@@ -28,16 +19,6 @@ const BASELINE_SMALL_CEILING: u64 = 5 * 1024;
 const GROWTH_ABSOLUTE_FLOOR: u64 = 20 * 1024;
 const GROWTH_RATIO_THRESHOLD: f64 = 10.0;
 
-/// Path segments that mark a package-manager cache/staging directory --
-/// files here are written incrementally during a normal install/extract
-/// (small stub, then filled with real content), so "small baseline that
-/// later balloons" is the expected shape of every ordinary `npm install`/
-/// `npx`, not tampering. Live-witnessed: 229 of 239 unusual-growth CRITICALs
-/// in one session were npm's own `_cacache`/`_npx` staging dirs, 0 of them
-/// real. Never a payload's *final resting place* for this attack class
-/// either -- a real bootstrap-hijack targets a package's already-installed,
-/// long-lived entry point, not a directory that gets wiped and rewritten on
-/// every install.
 const CACHE_STAGING_DIR_SEGMENTS: &[&str] = &["_cacache", "_npx", "node_modules/.cache", ".cache"];
 
 fn is_cache_staging_path(path: &std::path::Path) -> bool {
@@ -49,30 +30,8 @@ fn is_cache_staging_path(path: &std::path::Path) -> bool {
     })
 }
 
-/// `notify::Watcher::watch()` registrations below are one-time setup from
-/// `cfg.bootstrap_watch`/`cfg.backup_sibling_roots`, read once before the
-/// blocking `for res in rx` event loop -- unlike every other watcher's
-/// poll-loop shape, there is no periodic point to re-read a fresh Config
-/// from. A config-file change to WHICH roots are watched therefore still
-/// needs a restart to take effect; only the leaf-function behavior on
-/// already-watched paths (e.g. a bootstrap entry's max_bytes, read fresh
-/// per event via the cfg snapshot taken at startup) is not live-reloadable
-/// here. Re-registering a notify::Watcher on a live root-set change would
-/// need a materially more complex design (tracking the diff between old
-/// and new root sets, re-watching/un-watching individual paths) for a case
-/// that has not come up in practice -- the roots computed by
-/// default_for_platform() rarely change, and adding a wholly new
-/// bootstrap_watch entry via the config file is the one case that would
-/// currently require a restart to start being watched.
 pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>) {
     let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-    // First-seen size per path, for the generic "known-small file just got
-    // huge" detector below -- this is the general form of what the explicit
-    // bootstrap_watch entries in Config hand-name for specific known apps:
-    // no app name required, any small script anywhere under a watched root
-    // that later balloons in size is worth a look. Populated lazily as
-    // events arrive rather than pre-scanned, so it costs nothing on files
-    // that never change.
     let baselines: Arc<Mutex<HashMap<PathBuf, u64>>> = Arc::new(Mutex::new(HashMap::new()));
     let (tx, rx) = channel::<notify::Result<Event>>();
     let mut watcher = match notify::recommended_watcher(move |res| {
@@ -140,12 +99,6 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>) {
     }
 }
 
-/// Generic counterpart to check_bootstrap_size: no hardcoded app/file name
-/// required. Tracks the first-seen size of any watched script file; if a
-/// later size crosses BOTH the absolute floor and the growth-ratio
-/// threshold versus its own baseline, that's the same underlying tell (a
-/// small trusted entry point silently ballooning) without needing to know
-/// in advance which specific app/file it will be.
 fn check_unusual_growth(
     alerts: &AlertSink,
     baselines: &Mutex<HashMap<PathBuf, u64>>,
@@ -179,11 +132,6 @@ fn check_unusual_growth(
                     );
                 }
             }
-            // Baseline tracks the SMALLEST size ever seen, not the latest --
-            // once a file is confirmed to have legitimately grown (a real
-            // update), re-alerting on every subsequent edit would be noise;
-            // the smallest-seen value stays the reference point for "was
-            // this ever a tiny trusted bootstrap file."
             if current < baseline {
                 o.insert(current);
             }

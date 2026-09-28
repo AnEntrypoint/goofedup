@@ -1,233 +1,127 @@
-// Central tunables. Every detector reads from here so the whole posture can
-// be adjusted without hunting through module internals.
-//
-// Config itself stays a plain, always-fully-populated struct built by
-// default_for_platform() -- the platform/env-var detection logic below is
-// the one thing a config file must never have to reimplement. Runtime
-// tuning layers OVER this via ConfigOverrides (see below): an all-Option
-// struct deserialized from ~/.goofedup/goofedup.config.json and merged on
-// top, so a hand-edited file only needs to name the fields it actually wants
-// to change. SharedConfig is the hot-reloadable handle every consumer holds;
-// see config_reload.rs for the load/merge/reload-loop machinery built on
-// top of the types defined here.
-
 use crate::trust::UnsignedUserWritablePolicy;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
+const KIB: u64 = 1024;
+const MIB: u64 = KIB * 1024;
+const GIB: u64 = MIB * 1024;
+
+const DEFAULT_SCAN_DISTINCT_PORTS_THRESHOLD: usize = 20;
+const DEFAULT_SCAN_DISTINCT_HOSTS_THRESHOLD: usize = 40;
+const DEFAULT_SCAN_WINDOW_SECS: u64 = 10;
+const DEFAULT_FILE_READ_BURST_ABSOLUTE_BYTES_PER_POLL: u64 = 300 * MIB;
+const DEFAULT_FILE_READ_BURST_RELATIVE_MULTIPLIER: f64 = 8.0;
+const DEFAULT_FILE_READ_BURST_UNCORROBORATED_CEILING_BYTES: u64 = 2 * GIB;
+const DEFAULT_KNOWN_HIGH_THROUGHPUT_TOOL_MULTIPLIER: f64 = 16.0;
+const DEFAULT_POLL_INTERVAL_SECS: u64 = 3;
+const DEFAULT_READ_BURST_WINDOW_SIZE: usize = 4;
+const DEFAULT_READ_BURST_REQUIRED_SPIKES_IN_WINDOW: usize = 2;
+const DEFAULT_READ_BURST_CORROBORATED_THRESHOLD_FRACTION: f64 = 0.25;
+const DEFAULT_READ_BURST_BASELINE_EXEMPTION_MULTIPLIER: f64 = 3.0;
+const DEFAULT_READ_BURST_BASELINE_WARM_UP_FLOOR_BYTES: f64 = 512.0 * 1024.0;
+const DEFAULT_READ_BURST_EMA_ALPHA: f64 = 0.2;
+const DEFAULT_C2_MAX_DECODE_DEPTH: u32 = 4;
+const DEFAULT_ELECTRON_SWEEP_INTERVAL_SECS: u64 = 60 * 60;
+
+#[cfg(target_os = "windows")]
+const DISCORD_DESKTOP_CORE_INDEX_JS_MAX_BYTES: u64 = 2048;
+#[cfg(target_os = "windows")]
+const DEV_TOOL_HOME_DIRS_UNDER_USER_HOME: [&str; 6] =
+    [".cargo", ".rustup", "scoop", ".local", ".gm-tools", ".kimi-code"];
+#[cfg(target_os = "windows")]
+const PYTHON_ALL_USERS_INSTALL_MIN_MINOR_VERSION: u32 = 8;
+#[cfg(target_os = "windows")]
+const PYTHON_ALL_USERS_INSTALL_MAX_MINOR_VERSION: u32 = 14;
+
+const TRASH_PATH_FRAGMENTS: [&str; 4] = ["$Recycle.Bin", "RECYCLE.BIN", ".Trash", ".local/share/Trash"];
+
+const SHELL_AND_SCRIPT_INTERPRETER_NAMES: [&str; 14] = [
+    "node",
+    "node.exe",
+    "python",
+    "python3",
+    "powershell",
+    "powershell.exe",
+    "pwsh",
+    "pwsh.exe",
+    "wscript.exe",
+    "cscript.exe",
+    "mshta.exe",
+    "bash",
+    "sh",
+    "osascript",
+];
+
+const SYNC_AND_BACKUP_TOOL_NAMES: [&str; 7] = [
+    "syncthing.exe",
+    "syncthing",
+    "onedrive.exe",
+    "dropbox.exe",
+    "backblaze.exe",
+    "rsync",
+    "robocopy.exe",
+];
+const BROWSER_AND_ELECTRON_APP_NAMES: [&str; 7] = [
+    "chrome.exe",
+    "chrome",
+    "firefox.exe",
+    "firefox",
+    "msedgewebview2.exe",
+    "msedge.exe",
+    "discord.exe",
+];
+const AGENTPLUG_RUNNER_NAMES: [&str; 2] = ["agentplug-runner.exe", "agentplug-runner"];
+const CODEBASE_SEARCH_TOOL_NAMES: [&str; 2] = ["grep.exe", "grep"];
+const CLAUDE_CLI_NAMES: [&str; 2] = ["claude.exe", "claude"];
+
+const AUTOMATION_HARNESS_SHELL_ANCESTOR_NAMES: [&str; 3] = ["bash.exe", "cmd.exe", "claude.exe"];
+
+fn owned_strings(names: &[&str]) -> Vec<String> {
+    names.iter().map(|n| n.to_string()).collect()
+}
+
 pub struct Config {
-    /// Known-tiny bootstrap/loader files that must never grow past a sane
-    /// ceiling. Born from the real incident: Discord's own
-    /// discord_desktop_core/index.js should be ~40 bytes
-    /// ("module.exports = require('./core.asar')") and was overwritten with
-    /// a 270KB obfuscated payload.
     pub bootstrap_watch: Vec<BootstrapEntry>,
 
-    /// Directories to watch for a *.orig/*.bak/*.inz/*.original sibling
-    /// appearing next to a real file -- the infector's own backup, since it
-    /// has to preserve the original somewhere to keep the host app from
-    /// visibly breaking.
     pub backup_sibling_roots: Vec<PathBuf>,
 
-    /// Process names worth inspecting the command line of when they spawn.
     pub watched_interpreters: Vec<String>,
 
-    /// Path fragments that are an instant flag for ANY executing process,
-    /// regardless of name -- nothing legitimate runs from these. The
-    /// Recycle Bin holding ~21,000 stray Go/JS files in the real incident is
-    /// exactly this shape.
     pub deny_exec_path_fragments: Vec<String>,
 
-    /// Root directories process images are allowed to execute from without
-    /// triggering the "unusual path" flag. Anything outside all of these
-    /// (and not caught by the deny list above) is flagged WARN, not
-    /// CRITICAL -- an allowlist gap is common and noisy, not proof of
-    /// compromise.
     pub allowed_exec_roots: Vec<PathBuf>,
 
-    /// Network scan detection: a process opening connections to more than
-    /// this many DISTINCT destination ports OR DISTINCT destination hosts
-    /// within the rolling window is flagged as scanning behavior.
     pub scan_distinct_ports_threshold: usize,
     pub scan_distinct_hosts_threshold: usize,
     pub scan_window_secs: u64,
 
-    /// Mass file-read (drive scanning / harvesting) detection, via
-    /// sysinfo's per-process cumulative disk_usage() -- no elevation
-    /// required, works identically on all three platforms. Two independent
-    /// triggers, either one alerts: an ABSOLUTE burst (this many bytes read
-    /// in one poll interval, regardless of history -- catches a fast
-    /// scanner even on its very first observation) and a RELATIVE spike
-    /// (this many times the process's own recent average read rate --
-    /// catches a normally-quiet process suddenly scanning, even if the
-    /// absolute rate is modest for the system as a whole).
     pub file_read_burst_absolute_bytes_per_poll: u64,
     pub file_read_burst_relative_multiplier: f64,
 
-    /// A read this large fires CRITICAL regardless of exe path/name trust --
-    /// no dev tool observed on real hardware has ever legitimately needed
-    /// this much in one poll. Exists because path/name-based trust answers
-    /// "is this a legitimate BINARY," never "is this the actor actually
-    /// running it" (the same principle already applied to c2-shaped-process
-    /// severity) -- a compromise of an otherwise-trusted process could still
-    /// use it to exfiltrate at effectively unbounded volume, so trust must
-    /// have a ceiling it cannot buy past. Calibrated above the highest
-    /// legitimate burst live-witnessed on real dev-workstation hardware
-    /// (claude.exe and powershell.exe both hit 1.2-1.7GB/poll during normal
-    /// heavy operation -- a full codebase read, a large build).
     pub file_read_burst_uncorroborated_ceiling_bytes: u64,
 
-    /// Process names (case-insensitive, matched against sysinfo's reported
-    /// process name) that are KNOWN to legitimately sustain high burst reads
-    /// as their normal operating shape -- sync/backup/indexer tools and
-    /// browsers/Electron apps, per the README's own "Known false-positive
-    /// classes" section. A name match raises this process's effective
-    /// threshold on BOTH burst paths by `known_high_throughput_tool_
-    /// multiplier` -- the absolute floor AND the relative-spike multiplier
-    /// against its own baseline -- it does NOT exempt the process from
-    /// detection entirely: a name is not the same as the actor running
-    /// under it, so a genuinely extreme read still alerts.
     pub known_high_throughput_tool_names: Vec<String>,
     pub known_high_throughput_tool_multiplier: f64,
 
-    /// Root directories that only an OS installer or an administrator/root
-    /// can write to (`C:\Windows`, `C:\Program Files*` on Windows; `/usr`,
-    /// `/System`, `/Applications` on macOS; `/usr`, `/opt`, `/bin`, `/sbin`
-    /// on Linux) -- a fundamentally different trust basis than
-    /// `known_high_throughput_tool_names` above: that list says "this NAME
-    /// is known to burst," which only ever covers tools already seen and
-    /// degrades into a whitelist-of-the-week; this says "a binary an
-    /// attacker cannot silently drop a file into is not a plausible drive-
-    /// harvester," which covers any legitimate vendor/system tool doing
-    /// bulk I/O as its normal job (an archiver unpacking a large tree, an
-    /// IDE indexing a workspace, a COM surrogate doing thumbnail/search
-    /// work) without needing its name enumerated first. Live-witnessed
-    /// false positives of exactly this shape and nothing else in common:
-    /// `tar.exe` (C:\Program Files\Git\usr\bin), `Code.exe` (C:\Program
-    /// Files\Microsoft VS Code), `dllhost.exe` (C:\Windows\System32) --
-    /// three unrelated binaries whose only shared property is running from
-    /// a location a real attacker's dropped payload never occupies (writing
-    /// there requires the elevation a compromise doesn't grant for free).
-    /// Applied identically to both burst paths via the same
-    /// `known_high_throughput_tool_multiplier`, not a separate exemption --
-    /// a genuinely extreme read from a vendor-root binary still alerts.
     pub os_vendor_roots: Vec<PathBuf>,
 
-    /// Parent-process names (case-insensitive) known to legitimately spawn
-    /// interpreters with obfuscated-looking command lines as their normal
-    /// operating shape -- AI-assistant/automation harnesses that pass
-    /// scripts via -EncodedCommand to sidestep shell-escaping, per the
-    /// README's own "Known false-positive classes" section (the exact shape
-    /// a real attacker's living-off-the-land technique uses too). A match
-    /// does NOT change severity or suppress the alert -- c2-shaped-process
-    /// always fires CRITICAL regardless of parent, since a genuinely
-    /// malicious payload could run under a parent name that happens to
-    /// match this list too (live-confirmed: a real Discord-bootstrap-hijack
-    /// C2 loader fired under parent=recognized-dev-tool-ancestor on its
-    /// first hit). A match is noted in the evidence text as triage context
-    /// only.
     pub known_automation_parent_names: Vec<String>,
 
-    /// How often to re-poll process list / connection table / firewall
-    /// state (seconds). Real event sources are used where the platform
-    /// offers them (notify for fs, WMI/ETW on Windows); this interval only
-    /// governs the polling fallbacks (process/connection enumeration has no
-    /// portable cross-OS push API without extra native deps per platform).
     pub poll_interval_secs: u64,
 
     pub log_path: PathBuf,
 
-    // -- Promoted from inline `const`s so they become config-tunable too.
-    // Defaults below are bit-for-bit identical to the constants they
-    // replaced; their calibration-history doc comments moved here with
-    // them rather than being duplicated or dropped.
-    /// How many of the last N polls (a fixed-size sliding window, not
-    /// strict back-to-back consecutiveness) must score as a spike before
-    /// file-read-burst actually alerts. A real drive-scanning/harvesting
-    /// process sustains elevated reads across a short window; a legitimate
-    /// app's burst (a page load, a cache write, an update check) is
-    /// characteristically one-shot. Live-witnessed false positives
-    /// (firefox.exe, Discord.exe) were both single-poll spikes; requiring
-    /// persistence within a window eliminates that shape. A STRICT
-    /// back-to-back-with-no-gap requirement was tried first and
-    /// live-witnessed to fail: a real process whose own read rounds are
-    /// separated by even one intervening near-zero-delta poll (a genuinely
-    /// common shape -- disk I/O is bursty, not perfectly uniform, even for
-    /// a real scanner) never accumulates past 1 under strict
-    /// consecutiveness, since a single zero-delta poll resets the count to
-    /// 0 and erases all prior progress. A sliding window tolerates that gap
-    /// while still requiring genuine persistence, not one sample.
     pub read_burst_window_size: usize,
-    /// See `read_burst_window_size`'s doc comment for the windowed-
-    /// persistence rationale -- this is the count of spikes-in-window
-    /// required before it counts as sustained rather than one-shot.
     pub read_burst_required_spikes_in_window: usize,
-    /// A read-burst also flagged by the existing process-path checks
-    /// (denied or unlisted exec path -- reused, not reinvented) is far
-    /// stronger evidence than volume alone, so it clears the absolute floor
-    /// at this fraction of the normal bar. This is the volume-alone
-    /// false-positive class's actual fix: 223 CRITICALs in one operating
-    /// log, all from well-located, ordinarily-installed dev tools with no
-    /// other red flag -- corroboration lets a genuinely suspicious
-    /// combination (unusual location AND a large read) still alert well
-    /// below the raised floor, while volume by itself must clear the much
-    /// higher bar.
     pub read_burst_corroborated_threshold_fraction: f64,
-    /// Live-witnessed: a process whose own baseline is already substantial
-    /// (python.exe reading 60MB against a 13-24MB/poll established average)
-    /// is not anomalous relative to ITSELF just because the raw byte count
-    /// clears the absolute floor -- the absolute check exists to catch a
-    /// scanner even on its very first observation (no baseline yet), not to
-    /// re-flag a consistently high-throughput process on every poll near
-    /// its own normal level. A read within this multiple of the process's
-    /// own established baseline is excluded from the absolute-burst check
-    /// even if it clears the raw threshold.
     pub read_burst_baseline_exemption_multiplier: f64,
-    /// A live-witnessed false-positive source: a low EMA baseline built up
-    /// during a genuinely quiet stretch (an idle browser tab) makes any
-    /// ordinary burst of real activity look like a huge relative spike.
-    /// This floor requires the baseline itself to already reflect a
-    /// meaningful amount of steady-state activity (in bytes/poll) before
-    /// the relative check even engages, not just "greater than noise."
     pub read_burst_baseline_warm_up_floor_bytes: f64,
-    /// EMA smoothing factor for the read-rate baseline -- low enough that
-    /// one legitimate burst (a real build, a real backup job starting)
-    /// doesn't permanently poison the baseline as "normal," but the
-    /// baseline still adapts over a handful of polls to genuine sustained
-    /// changes in a process's normal operating level.
     pub read_burst_ema_alpha: f64,
-    /// Bound on how many nested `-EncodedCommand`/`$EncodedCommand = '...'`
-    /// layers the C2-shape decoder will unwrap before giving up -- exists so
-    /// a pathological or adversarial input can't force unbounded recursion,
-    /// not because any real legitimate or malicious sample observed so far
-    /// has needed more than a couple of layers.
     pub c2_max_decode_depth: u32,
 
-    /// Whether the proactive Electron/VSCode-family sweep (electron_sweep.rs)
-    /// runs at all. Born from a live-witnessed 5+ week miss: the Antigravity
-    /// IDE compromise (a VSCode-fork, not Discord/Adobe/Slack/Teams) sat
-    /// undetected because nothing proactively looked at it -- the
-    /// alert-response widening in scan_js.rs only engages AFTER some other
-    /// alert already names an app. This sweep auto-discovers Electron/
-    /// VSCode-family installs by SHAPE (app.asar / @vscode module tree /
-    /// electron binary) instead of a hardcoded name list, so a novel target
-    /// like this one is covered from the start, not just after a miss is
-    /// noticed by hand.
     pub electron_sweep_enabled: bool,
-    /// How often the sweep re-scans every discovered install (seconds).
-    /// Deliberately much slower than poll_interval_secs -- this is a
-    /// full-content HiddenSpawn scan plus a whole-tree existing-file
-    /// backup-sibling walk, not a lightweight per-event check, so it must
-    /// stay cheap enough to run indefinitely in the background. Default is
-    /// hourly, matching the task's own "once per hour" cadence.
     pub electron_sweep_interval_secs: u64,
-    /// Root directories to search (recursively, bounded depth) for
-    /// Electron/VSCode-family app installs. Computed per-platform in
-    /// `default_for_platform` -- typically the per-user "Programs" install
-    /// tree (e.g. `%LOCALAPPDATA%\Programs` on Windows), since that's where
-    /// a non-admin install of an app like Antigravity/Cursor/VS Code lands
-    /// without ever touching Program Files.
     pub electron_sweep_roots: Vec<PathBuf>,
     pub tamper: crate::tamper_config::TamperConfig,
     pub trusted_publishers: Vec<String>,
@@ -244,19 +138,6 @@ pub struct BootstrapEntry {
     pub max_bytes: u64,
 }
 
-/// All-`Option<T>` mirror of `Config`, deserialized from
-/// `~/.goofedup/goofedup.config.json` if present. `None` means "not
-/// overridden, use the platform-computed default from
-/// `Config::default_for_platform()`" -- a config file is a set of
-/// deviations from the computed baseline, never a full replacement, so
-/// `default_for_platform()`'s env-var/platform-detection logic never needs
-/// reimplementing in JSON. A `Vec<T>` override REPLACES the default list
-/// wholesale, it does not append -- simplest semantics, and matches "this
-/// list is wrong, here's my list" rather than an ambiguous merge rule.
-///
-/// `deny_unknown_fields` is deliberately NOT set: an older binary reading a
-/// newer config file (or vice versa) should ignore fields it doesn't
-/// recognize, not fail to start.
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ConfigOverrides {
@@ -302,11 +183,6 @@ pub struct BootstrapEntryOverride {
     pub max_bytes: u64,
 }
 
-/// Merges `overrides` onto `base` field-by-field: a `Some(v)` replaces the
-/// default, a `None` leaves the computed default untouched. An explicit
-/// function rather than a generic/macro-based merge -- more debuggable and
-/// greppable for ~23 fields than machinery that obscures which field maps
-/// to which.
 pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     if let Some(v) = &o.bootstrap_watch {
         base.bootstrap_watch = v
@@ -413,20 +289,8 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     base
 }
 
-/// The hot-reloadable handle every watcher thread holds. The OUTER Arc is
-/// what gets cloned per-thread (cheap, same as before); the inner Arc is
-/// what gets swapped on reload (a single pointer write under a brief
-/// write-lock) and is also what a reader clones once per poll iteration so
-/// that iteration sees a fully-consistent Config snapshot, never a mix of
-/// old and new fields. See config_reload.rs for the reload loop that
-/// actually calls `apply_reload`.
 pub type SharedConfig = Arc<RwLock<Arc<Config>>>;
 
-/// Swaps in a newly-loaded, already-merged Config. The write-lock is held
-/// only for the duration of the pointer assignment -- readers never block
-/// on anything but that instant, and this call never blocks on a slow
-/// reader either, since readers only ever hold a read-lock long enough to
-/// clone the inner Arc.
 pub fn apply_reload(shared: &SharedConfig, new_cfg: Config) {
     *shared.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(new_cfg);
 }
@@ -442,22 +306,6 @@ pub struct ConfigSection {
     pub rows: Vec<ConfigRow>,
 }
 
-/// Single source of truth for "what does the current config look like,
-/// human-readably" -- both the CLI's `--show-config` and the GUI's "Show
-/// Config" window call this same function and format the result for their
-/// own output, so there is exactly one place enumerating Config's fields
-/// instead of two independently hand-maintained lists silently drifting
-/// out of sync with each other and with the real struct (as they had:
-/// os_vendor_roots, known_high_throughput_tool_names,
-/// known_high_throughput_tool_multiplier, known_automation_parent_names,
-/// and file_read_burst_uncorroborated_ceiling_bytes were missing from both
-/// before this function existed).
-///
-/// A row whose value came from `overrides` rather than the computed
-/// default gets an explicit "(from config file)" suffix folded directly
-/// into its value string -- a deliberate choice over a separate
-/// is_overridden flag/column, since it needs no changes to the existing
-/// win32 list-view rendering in gui/alert_window.rs at all.
 pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigSection> {
     fn marked(value: String, overridden: bool) -> String {
         if overridden {
@@ -713,15 +561,12 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
 }
 
 fn format_bytes(b: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    if b >= GB {
-        format!("{:.1}GB", b as f64 / GB as f64)
-    } else if b >= MB {
-        format!("{:.1}MB", b as f64 / MB as f64)
-    } else if b >= KB {
-        format!("{:.1}KB", b as f64 / KB as f64)
+    if b >= GIB {
+        format!("{:.1}GB", b as f64 / GIB as f64)
+    } else if b >= MIB {
+        format!("{:.1}MB", b as f64 / MIB as f64)
+    } else if b >= KIB {
+        format!("{:.1}KB", b as f64 / KIB as f64)
     } else {
         format!("{b}B")
     }
@@ -735,20 +580,7 @@ impl Config {
         let mut bootstrap_watch = Vec::new();
         let mut backup_sibling_roots = Vec::new();
         let mut allowed_exec_roots = Vec::new();
-        // A STRICT subset of allowed_exec_roots below: only the roots an
-        // attacker cannot write to without the elevation a compromise
-        // doesn't grant for free (the OS install tree, the vendor
-        // application-install tree). Deliberately excludes the
-        // user-writable dev-tool homes (.cargo, .local, LOCALAPPDATA, etc.)
-        // that share allowed_exec_roots for the unrelated process-PATH
-        // check -- those are fine places to run FROM, but not a reason to
-        // expect bulk I/O to be safe, since a compromise can write there
-        // freely.
         let mut os_vendor_roots = Vec::new();
-        // Roots the proactive Electron/VSCode-family sweep (electron_sweep.rs)
-        // walks looking for an app install by SHAPE, not name -- see that
-        // field's own doc comment for why this exists at all (the
-        // Antigravity IDE miss).
         let mut electron_sweep_roots = Vec::new();
 
         #[cfg(target_os = "windows")]
@@ -759,15 +591,12 @@ impl Config {
                     search_root: local.join("Discord"),
                     file_name: "index.js".to_string(),
                     path_must_contain: "discord_desktop_core".to_string(),
-                    max_bytes: 2048,
+                    max_bytes: DISCORD_DESKTOP_CORE_INDEX_JS_MAX_BYTES,
                 });
                 backup_sibling_roots.push(local.join("Discord"));
                 backup_sibling_roots.push(local.join("npm-cache"));
                 allowed_exec_roots.push(local.clone());
                 allowed_exec_roots.push(local.join("Microsoft"));
-                // Per-user, no-admin-required app install tree -- where a
-                // VSCode-fork IDE (Antigravity, Cursor, ...) or any other
-                // Electron app installed "for me only" actually lands.
                 electron_sweep_roots.push(local.join("Programs"));
             }
             if let Ok(appdata) = std::env::var("APPDATA") {
@@ -776,22 +605,7 @@ impl Config {
                 backup_sibling_roots.push(appdata.join("npm-cache"));
                 allowed_exec_roots.push(appdata);
             }
-            // Portable dev-tool install homes -- the same roots macOS/Linux
-            // already allow below. Live-witnessed allowlist gaps: rustc/
-            // cargo/clippy run from ~/.rustup/~/.cargo toolchain dirs, pip
-            // and scoop-managed tools from ~/scoop, user-local CLI tooling
-            // from ~/.local/bin and per-tool homes like ~/.kimi-code and
-            // ~/.gm-tools. Each is a user-writable location, so the check
-            // stays WARN-tier exactly as before -- this only closes known
-            // noise gaps, it does not trust anything.
-            for dev_home in [
-                ".cargo",
-                ".rustup",
-                "scoop",
-                ".local",
-                ".gm-tools",
-                ".kimi-code",
-            ] {
+            for dev_home in DEV_TOOL_HOME_DIRS_UNDER_USER_HOME {
                 allowed_exec_roots.push(home.join(dev_home));
             }
             if let Ok(pf) = std::env::var("ProgramFiles") {
@@ -806,21 +620,9 @@ impl Config {
                 allowed_exec_roots.push(PathBuf::from(windir.clone()));
                 os_vendor_roots.push(PathBuf::from(windir));
             }
-            // python.org's Windows installer's "Install for all users" option
-            // (an admin-elevation-gated install, same trust tier as Program
-            // Files/WINDIR above) writes directly to the system drive root
-            // as `PythonXX`, not under Program Files -- live-witnessed as
-            // this machine's single largest process-path WARN source (34
-            // occurrences, C:\Python312\python.exe) despite being a
-            // completely standard install location, not an unusual one.
-            // Enumerated by version rather than matched by glob since
-            // is_unlisted_exec_path does exact-prefix matching; covers the
-            // actively-maintained CPython release line plus enough headroom
-            // for this to keep working across ordinary version upgrades
-            // without needing another gap-fill each time.
             if let Ok(sysdrive) = std::env::var("SystemDrive") {
                 let sysdrive = PathBuf::from(sysdrive);
-                for minor in 8..=14u32 {
+                for minor in PYTHON_ALL_USERS_INSTALL_MIN_MINOR_VERSION..=PYTHON_ALL_USERS_INSTALL_MAX_MINOR_VERSION {
                     let root = sysdrive.join(format!("Python3{minor}"));
                     allowed_exec_roots.push(root.clone());
                     os_vendor_roots.push(root);
@@ -866,186 +668,50 @@ impl Config {
 
         allowed_exec_roots.push(home.join(".goofedup"));
 
-        let deny_exec_path_fragments = vec![
-            "$Recycle.Bin".to_string(),
-            "RECYCLE.BIN".to_string(),
-            ".Trash".to_string(),
-            ".local/share/Trash".to_string(),
-        ];
+        let deny_exec_path_fragments = owned_strings(&TRASH_PATH_FRAGMENTS);
 
         Self {
             bootstrap_watch,
             backup_sibling_roots,
-            watched_interpreters: vec![
-                "node".to_string(),
-                "node.exe".to_string(),
-                "python".to_string(),
-                "python3".to_string(),
-                "powershell".to_string(),
-                "powershell.exe".to_string(),
-                "pwsh".to_string(),
-                "pwsh.exe".to_string(),
-                "wscript.exe".to_string(),
-                "cscript.exe".to_string(),
-                "mshta.exe".to_string(),
-                "bash".to_string(),
-                "sh".to_string(),
-                "osascript".to_string(),
-            ],
+            watched_interpreters: owned_strings(&SHELL_AND_SCRIPT_INTERPRETER_NAMES),
             deny_exec_path_fragments,
             allowed_exec_roots,
             os_vendor_roots,
-            scan_distinct_ports_threshold: 20,
-            // Live-witnessed false-positive calibration: a desktop browser
-            // loading a normal page fans out to 15-27 distinct CDN hosts in
-            // a 10s window (recorded chrome.exe peaks), so the old value of
-            // 15 fired on ordinary browsing. 40+ distinct hosts in 10s is
-            // still far outside any legitimate interactive app's shape
-            // while remaining well below a real scanner's rate.
-            scan_distinct_hosts_threshold: 40,
-            scan_window_secs: 10,
-            // Originally 50MB, calibrated against real recorded evidence:
-            // on an actual dev workstation (compilers, package managers,
-            // repo-wide grep, AI coding tools, browsers, archivers all
-            // running normally) this floor alone produced 223 CRITICALs in
-            // one operating log with a true-positive rate of zero -- every
-            // single one traced to ordinary tool activity, never to the
-            // real incident this log also contains (caught by other
-            // detectors entirely). 300MB is still well past a real
-            // interactive tool's one-shot need, but clears the routine
-            // 70-290MB bursts live-witnessed from grep/tar/dllhost/Code/zig
-            // doing their normal job. A real bulk build/backup/indexer
-            // legitimately sustains high read rates, which is exactly what
-            // the relative-multiplier check below is for -- this absolute
-            // floor exists to catch a fast scanner even the very first time
-            // it's observed, before any baseline exists to compare against.
-            file_read_burst_absolute_bytes_per_poll: 300 * 1024 * 1024,
-            file_read_burst_relative_multiplier: 8.0,
-            // No trust exemption applies past this -- see the field's own
-            // doc comment.
-            file_read_burst_uncorroborated_ceiling_bytes: 2 * 1024 * 1024 * 1024,
-            known_high_throughput_tool_names: vec![
-                "syncthing.exe".to_string(),
-                "syncthing".to_string(),
-                "onedrive.exe".to_string(),
-                "dropbox.exe".to_string(),
-                "backblaze.exe".to_string(),
-                "rsync".to_string(),
-                "robocopy.exe".to_string(),
-                // Browsers and Electron apps: live-witnessed false-positive
-                // sources for the RELATIVE-spike path (chrome/firefox/Discord
-                // all recorded sustained multi-poll spikes against their own
-                // quiet-tab baselines during ordinary page loads and media
-                // playback). Listed here, not exempted -- an extreme read
-                // still alerts, just against a proportionally higher bar.
-                "chrome.exe".to_string(),
-                "chrome".to_string(),
-                "firefox.exe".to_string(),
-                "firefox".to_string(),
-                "msedgewebview2.exe".to_string(),
-                "msedge.exe".to_string(),
-                "discord.exe".to_string(),
-                // gm's own dispatch daemon. Live bug found via a one-shot
-                // sysinfo-name-vs-allowlist witness: this name was described
-                // in this field's own doc comment above as already listed,
-                // but was never actually added to this Vec -- so the
-                // relaxation never applied and every dispatch burst fell
-                // through to the unrelaxed 50MB floor, which its normal
-                // 70-99MB reads clear easily. The relative-spike relaxation
-                // alone can't fix this either: agentplug-runner.exe respawns
-                // under a fresh PID often (self-update swaps, daemon
-                // restarts), so its ReadTracker rarely has an established
-                // baseline to be relative to -- only the absolute floor
-                // matters for its real shape (idle, then a burst).
-                "agentplug-runner.exe".to_string(),
-                "agentplug-runner".to_string(),
-                // grep.exe (Git-for-Windows' usr/bin/grep, and its Unix
-                // equivalents): a codebase-search tool's whole job is
-                // reading large amounts of file data quickly across many
-                // files -- the exact "drive scanning/harvesting" shape this
-                // detector looks for, but as its own normal, expected
-                // operation. Live-witnessed: 34 CRITICALs across 5 days, all
-                // 'grep.exe', both absolute-burst and relative-spike paths,
-                // recurring in the same dense bursts (a large `grep -r`
-                // across a big repo hits many polls in a row) rather than a
-                // single one-off -- a real scanning/harvesting process would
-                // look identical by design, but a search tool doing exactly
-                // what it's for is not evidence of anything.
-                "grep.exe".to_string(),
-                "grep".to_string(),
-                // claude.exe (the Claude Code CLI itself, installed at the
-                // standard ~/.local/bin location): a large (~384MB)
-                // self-contained binary that reads a burst of its own
-                // bundled assets/model data into memory on startup.
-                // Live-witnessed: 1.7GB read in ~3s against a 0B baseline
-                // (session startup, no prior activity to average against)
-                // -- the AI-assistant-harness startup shape this project's
-                // own README already documents as expected noise for
-                // -EncodedCommand PowerShell, now confirmed for this
-                // process's own file-read pattern too.
-                "claude.exe".to_string(),
-                "claude".to_string(),
-            ],
-            // 6.0 -> 16.0: syncthing.exe (already listed above, since before
-            // this session's tuning) kept firing file-read-burst on the
-            // RELATIVE-spike path even with the 6.0 relaxation -- live-
-            // witnessed real bursts of 62x-121x its own recent baseline
-            // (e.g. 65.1MB against a 549KB/poll average = ~121x), a real
-            // sync engine catching up after a quiet stretch, comfortably
-            // clearing the old 8.0*6.0=48x effective bar. 16.0 gives
-            // 8.0*16.0=128x headroom, covering the worst observed real
-            // spike with margin, while the absolute floor this multiplier
-            // also relaxes (50MB*16=800MB) and the network-scan host-sweep
-            // floor (40*16=640 hosts) both stay far below what a genuinely
-            // extreme scanner/harvester would need to clear -- this raises
-            // the bar for known-legitimate tools only, it doesn't touch
-            // what counts as extreme in the first place.
-            known_high_throughput_tool_multiplier: 16.0,
-            // agentplug-runner.exe is gm's own dispatch daemon: its exec_js
-            // verb spawns powershell.exe -EncodedCommand directly for every
-            // PowerShell script dispatch, live-confirmed via
-            // agentplug-host's exec_js.rs and this project's own recorded
-            // c2-shaped-process alerts (168 hits in one session, all firing
-            // during active /gm dispatch windows) -- a real, identifiable
-            // source of this exact false-positive shape, not a guess.
-            //
-            // bash.exe/cmd.exe/claude.exe are live-witnessed via a real
-            // sysinfo::Process::parent() chain walk of a process launched
-            // through this session's own AI-assistant tool-dispatch path:
-            // the interpreter's immediate parent was NOT agentplug-runner.exe
-            // at all but an intermediate shell (bash.exe, nested three deep)
-            // itself parented by claude.exe then cmd.exe -- explaining why
-            // an immediate-parent-only check against agentplug-runner.exe
-            // alone almost never matched in practice. explorer.exe also
-            // appears further up this same chain but is deliberately
-            // excluded: it is the universal desktop-shell ancestor of nearly
-            // every interactive process on the machine, so trusting it would
-            // make the whole check match almost anything a user launches by
-            // hand, defeating its purpose.
-            known_automation_parent_names: vec![
-                "agentplug-runner.exe".to_string(),
-                "agentplug-runner".to_string(),
-                "bash.exe".to_string(),
-                "cmd.exe".to_string(),
-                "claude.exe".to_string(),
-            ],
-            poll_interval_secs: 3,
+            scan_distinct_ports_threshold: DEFAULT_SCAN_DISTINCT_PORTS_THRESHOLD,
+            scan_distinct_hosts_threshold: DEFAULT_SCAN_DISTINCT_HOSTS_THRESHOLD,
+            scan_window_secs: DEFAULT_SCAN_WINDOW_SECS,
+            file_read_burst_absolute_bytes_per_poll: DEFAULT_FILE_READ_BURST_ABSOLUTE_BYTES_PER_POLL,
+            file_read_burst_relative_multiplier: DEFAULT_FILE_READ_BURST_RELATIVE_MULTIPLIER,
+            file_read_burst_uncorroborated_ceiling_bytes: DEFAULT_FILE_READ_BURST_UNCORROBORATED_CEILING_BYTES,
+            known_high_throughput_tool_names: [
+                &SYNC_AND_BACKUP_TOOL_NAMES[..],
+                &BROWSER_AND_ELECTRON_APP_NAMES[..],
+                &AGENTPLUG_RUNNER_NAMES[..],
+                &CODEBASE_SEARCH_TOOL_NAMES[..],
+                &CLAUDE_CLI_NAMES[..],
+            ]
+            .iter()
+            .flat_map(|group| owned_strings(group))
+            .collect(),
+            known_high_throughput_tool_multiplier: DEFAULT_KNOWN_HIGH_THROUGHPUT_TOOL_MULTIPLIER,
+            known_automation_parent_names: [
+                &AGENTPLUG_RUNNER_NAMES[..],
+                &AUTOMATION_HARNESS_SHELL_ANCESTOR_NAMES[..],
+            ]
+            .iter()
+            .flat_map(|group| owned_strings(group))
+            .collect(),
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             log_path,
-            read_burst_window_size: 4,
-            read_burst_required_spikes_in_window: 2,
-            read_burst_corroborated_threshold_fraction: 0.25,
-            read_burst_baseline_exemption_multiplier: 3.0,
-            read_burst_baseline_warm_up_floor_bytes: 512.0 * 1024.0,
-            read_burst_ema_alpha: 0.2,
-            c2_max_decode_depth: 4,
+            read_burst_window_size: DEFAULT_READ_BURST_WINDOW_SIZE,
+            read_burst_required_spikes_in_window: DEFAULT_READ_BURST_REQUIRED_SPIKES_IN_WINDOW,
+            read_burst_corroborated_threshold_fraction: DEFAULT_READ_BURST_CORROBORATED_THRESHOLD_FRACTION,
+            read_burst_baseline_exemption_multiplier: DEFAULT_READ_BURST_BASELINE_EXEMPTION_MULTIPLIER,
+            read_burst_baseline_warm_up_floor_bytes: DEFAULT_READ_BURST_BASELINE_WARM_UP_FLOOR_BYTES,
+            read_burst_ema_alpha: DEFAULT_READ_BURST_EMA_ALPHA,
+            c2_max_decode_depth: DEFAULT_C2_MAX_DECODE_DEPTH,
             electron_sweep_enabled: true,
-            // Once per hour, per the task's own calibration -- slow enough
-            // that a full content scan plus an existing-file backup-sibling
-            // walk over every discovered install never competes with the
-            // live watchers for disk I/O, fast enough that a miss like the
-            // Antigravity one is caught same-day instead of five weeks
-            // later.
-            electron_sweep_interval_secs: 60 * 60,
+            electron_sweep_interval_secs: DEFAULT_ELECTRON_SWEEP_INTERVAL_SECS,
             electron_sweep_roots,
             tamper: crate::tamper_config::TamperConfig::default(),
             trusted_publishers: crate::trust::default_trusted_publishers(),
@@ -1078,9 +744,6 @@ pub fn dirs_home() -> PathBuf {
     PathBuf::from(".")
 }
 
-/// Where the hot-reloadable override file lives -- sibling to the existing
-/// log file, under the same directory both binaries already create at
-/// startup.
 pub fn override_path(home: &std::path::Path) -> PathBuf {
     home.join(".goofedup").join("goofedup.config.json")
 }

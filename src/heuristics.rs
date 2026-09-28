@@ -1,12 +1,3 @@
-// Pure, host-independent heuristics. Every function here takes plain data
-// (a command line string, a path string) and returns a verdict -- no OS
-// calls, no side effects, so they're identical on every platform and cheap
-// to reason about in isolation. One deliberate, narrow exception:
-// decode_encoded_command/score_command_line take a max_decode_depth
-// parameter (sourced from Config::c2_max_decode_depth by their callers) so
-// that bound is hot-tunable too, rather than threading the whole Config
-// through a module that otherwise has no config coupling at all.
-
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -15,24 +6,37 @@ pub struct Verdict {
     pub reasons: Vec<String>,
 }
 
+const MIN_INLINE_PAYLOAD_CMDLINE_LEN: usize = 300;
+const LONG_CMDLINE_LEN: usize = 600;
+const VERY_LONG_CMDLINE_LEN: usize = 2000;
+const LONG_ENCODED_BLOB_MIN_RUN: usize = 120;
+const HIGH_SYMBOL_DENSITY_RATIO: f64 = 0.30;
+const PACKED_ENTROPY_BITS_PER_CHAR: f64 = 5.2;
+const ELEVATED_ENTROPY_BITS_PER_CHAR: f64 = 4.7;
+const COMMAND_LINE_ALERT_SCORE: u32 = 3;
+
+const MIN_ENCODED_ARGUMENT_LEN: usize = 8;
+const UTF16_TEXT_MAX_NON_ASCII_RATIO: f64 = 0.2;
+const ENCODED_COMMAND_PATTERNS: [&str; 4] = ["-EncodedCommand", "-enc ", "$EncodedCommand = '", "$EncodedCommand='"];
+
+const HIDDEN_UNICODE_ESCAPE_MIN_RUN: usize = 4;
+const HIDDEN_UNICODE_ESCAPE_SCORE: u32 = 5;
+
+const PACKED_IIFE_SCORE_BASE: u32 = 8;
+const CONFIG_PAYLOAD_SCORE_BASE: u32 = 6;
+const JS_MASQUERADING_AS_ASSET_SCORE_BASE: u32 = 9;
+const HIDDEN_SPAWN_MARKER_SCORE_BONUS: u32 = 4;
+const ASSET_MIN_BYTES_FOR_JS_CHECK: usize = 32;
+const ASSET_JS_PREVIEW_MAX_BYTES: usize = 48;
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+const ADOBE_CREATIVE_CLOUD_BUNDLED_NODE_HOME: &str = "\\adobe\\adobe creative cloud experience\\libs";
+
 fn ip_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap())
 }
 
-/// True for loopback (127.0.0.0/8), RFC 1918 private ranges, and link-local
-/// (169.254.0.0/16) -- an address that can never be a real external C2
-/// endpoint since it never leaves the host/local network, only a local
-/// service a benign tool is legitimately talking to (a dev server, a test
-/// harness's own child process, a local API). Live-witnessed: every
-/// `embedded IP literal` hit in one operating log's recurring
-/// c2-shaped-process false positive was 127.0.0.1 -- a Node automation
-/// one-liner (`node -e "... require('child_process') ..."`) polling its own
-/// local test server, scored identically to a real hardcoded external C2
-/// address (the actual incident this detector exists to catch used
-/// 23.27.13.135, a real routable address, entirely unaffected by this
-/// exemption). General range-based structure, not a literal-address
-/// allowlist -- covers any local-only address, not just the one observed.
 fn is_non_routable_ip(ip: &str) -> bool {
     let octets: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
     let [a, b, ..] = octets[..] else { return false };
@@ -44,18 +48,6 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"https?://[^\s'\x22]+").unwrap())
 }
 
-/// True when a `http(s)://` URL's host is `localhost` or a non-routable IP
-/// (see is_non_routable_ip) -- the same "can this ever actually be a C2
-/// endpoint" question the IP-literal check already asks, applied to the URL
-/// check too, since a URL and a bare IP literal are the same underlying
-/// signal (a network destination) spelled two different ways. Live-
-/// witnessed: the identical recurring node.exe automation one-liner that
-/// produced loopback-IP false positives also produces this shape via
-/// `fetch('http://127.0.0.1:PORT/...')` or `http://localhost:PORT/...`
-/// literally in its source, scored as "embedded URL literal" with no
-/// distinction from a real hardcoded C2 URL. The real incident's URLs
-/// (http://23.27.13.135:443, :80) have a fully routable host and are
-/// unaffected.
 fn url_host_is_non_routable(url: &str) -> bool {
     let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let host_and_port = after_scheme
@@ -67,32 +59,12 @@ fn url_host_is_non_routable(url: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || is_non_routable_ip(host)
 }
 
-/// Generic obfuscation/exfil tells that show up across many unrelated
-/// malware families and toolchains (packers, stealers, loaders, C2
-/// beacons), not specific to any one incident. Each is a small BONUS on top
-/// of the structural signals below (length, entropy, IP/URL literals,
-/// encoded-blob density) -- none of these alone should ever be the deciding
-/// factor, since several appear in legitimate tooling too. Kept broad and
-/// generic on purpose: a NEW, never-seen-before payload with none of these
-/// exact tokens still has to score on shape alone.
 const OBFUSCATION_MARKERS: &[&str] = &[
     "eval(",
     "Function(",
     "fromCharCode",
     "atob(",
     "btoa(",
-    // child_process deliberately excluded -- unlike every other entry here,
-    // it's a standard Node.js module name that shows up in an enormous
-    // fraction of completely ordinary automation/build tooling (spawning a
-    // subprocess is one of Node's most routine tasks), not a pattern
-    // specifically associated with obfuscation or exfiltration. Live-
-    // witnessed: every c2-shaped-process false positive with this marker
-    // was `node -e "... require('child_process') ..."` from this project's
-    // own dev-automation tooling, never anything with actual malicious
-    // content -- a real attacker's use of it is already caught by the
-    // ACTION it enables (a real IP/URL, a decoded blob, an eval/download
-    // cradle), all scored independently and much more strongly than a
-    // module-name substring match ever should be.
     "createDecipheriv",
     "createCipheriv",
     "XOR",
@@ -108,29 +80,6 @@ const OBFUSCATION_MARKERS: &[&str] = &[
     "curl -s",
 ];
 
-/// Extracts and decodes a PowerShell `-EncodedCommand`/`-enc` argument's
-/// base64 payload (PowerShell's own documented format: base64 of UTF-16LE
-/// text) so its DECODED content can be scored instead of the encoding
-/// wrapper itself. Live-witnessed root cause of a real false-positive class:
-/// `-EncodedCommand` is itself in OBFUSCATION_MARKERS, and any encoded
-/// command of reasonable length trivially satisfies has_long_encoded_blob
-/// too (that's definitionally what base64-encoding produces) -- so a
-/// completely benign encoded command (decoded sample: `$EncodedCommand =
-/// '...'; ... cd C:\dev\...`) and a genuinely malicious one both score
-/// identically on the WRAPPER alone, before any actual content is examined.
-/// Recurses (bounded to MAX_DECODE_DEPTH) into a `$EncodedCommand =
-/// '<base64>'`-shaped assignment found in the decoded text -- live-
-/// witnessed: this project's own automation harness nests a SECOND
-/// -EncodedCommand-style layer inside the first (decodes to
-/// `$EncodedCommand = 'Y2QgQzpc...'`), and without recursing, that inner
-/// base64 string itself still trivially satisfies has_long_encoded_blob on
-/// the one-layer-decoded text, reproducing the exact same false-positive
-/// shape one level down. Returns None if no `-EncodedCommand`/`-enc` flag
-/// is present, or if the argument after it doesn't decode as valid base64
-/// UTF-16LE (a malformed argument is itself unusual but not this
-/// function's concern -- the raw cmdline's other signals still apply
-/// either way since the caller falls back to scoring the original string
-/// when this returns None).
 pub fn decode_encoded_command(cmdline: &str, max_decode_depth: u32) -> Option<String> {
     let first = decode_one_encoded_command(cmdline)?;
     let mut current = first;
@@ -143,43 +92,9 @@ pub fn decode_encoded_command(cmdline: &str, max_decode_depth: u32) -> Option<St
     Some(current)
 }
 
-/// Single-layer decode: finds the first `-EncodedCommand`/`-enc <base64>`
-/// or `$EncodedCommand = '<base64>'` shape in `text` and decodes it.
-///
-/// Tries UTF-16LE first (PowerShell's own documented -EncodedCommand
-/// format), then falls back to plain UTF-8. This matters beyond the outer
-/// CLI-flag layer: live-witnessed, a real automation harness's INNER
-/// `$EncodedCommand = '...'` assignment is its own custom convention
-/// wrapping a plain UTF-8-encoded PowerShell one-liner (decoded real
-/// samples: `Stop-Process -Id ...`, `Get-CimInstance Win32_Process
-/// -Filter ...`), not another UTF-16LE PowerShell-native layer -- a
-/// decoder that only tries UTF-16LE silently fails on this inner layer
-/// (odd byte count, or `String::from_utf16` erroring on bytes that are
-/// valid UTF-8 but not valid UTF-16 code units) and the caller falls back
-/// to the outer-decoded text, which still contains the short inner blob
-/// still tripping has_long_encoded_blob -- the same false-positive shape
-/// recurring because of an encoding-format assumption, not because the
-/// content was ever actually re-examined. Trying UTF-8 as a fallback
-/// generalizes the decoder to any base64-wrapped-text convention, not
-/// just PowerShell's specific -EncodedCommand format, which is the right
-/// scope: a real payload could be base64-wrapped in either encoding.
 fn decode_one_encoded_command(text: &str) -> Option<String> {
-    // Collect every candidate flag/assignment occurrence in the text, in
-    // order, rather than only the first pattern that matches anywhere --
-    // live-witnessed: a harness-generated dispatch line like
-    // `powershell -NoProfile -EncodedCommand $EncodedCommand` contains a
-    // bare `-EncodedCommand` flag (referencing a variable, no inline
-    // base64 after it) BEFORE the real `$EncodedCommand = '<base64>'`
-    // assignment earlier in the same script. Priority-ordered `.or_else`
-    // picks whichever PATTERN ranks first and stops there even when that
-    // specific occurrence has no usable payload, so recursion silently
-    // stalled one layer short of the real content -- the same
-    // false-positive shape as the original single-encoding bug, just one
-    // level deeper. Trying every occurrence of every pattern, in the order
-    // they appear, and moving on when one doesn't yield valid base64
-    // generalizes correctly to any mix/order of these shapes in one script.
     let mut candidates: Vec<usize> = Vec::new();
-    for pat in ["-EncodedCommand", "-enc ", "$EncodedCommand = '", "$EncodedCommand='"] {
+    for pat in ENCODED_COMMAND_PATTERNS {
         let mut start = 0;
         while let Some(i) = text[start..].find(pat) {
             let abs = start + i;
@@ -195,7 +110,7 @@ fn decode_one_encoded_command(text: &str) -> Option<String> {
             .chars()
             .take_while(|c| c.is_ascii_alphanumeric() || *c == '+' || *c == '/' || *c == '=')
             .collect();
-        if b64.len() < 8 {
+        if b64.len() < MIN_ENCODED_ARGUMENT_LEN {
             continue;
         }
         let Some(bytes) = base64_decode(&b64) else { continue };
@@ -203,16 +118,9 @@ fn decode_one_encoded_command(text: &str) -> Option<String> {
         if bytes.len() >= 2 && bytes.len() % 2 == 0 {
             let utf16: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             if let Ok(s) = String::from_utf16(&utf16) {
-                // A real UTF-16LE PowerShell command is overwhelmingly ASCII
-                // text with the occasional wide char, not dense with U+0100+
-                // code points -- decoding arbitrary UTF-8 bytes as UTF-16LE
-                // can still "succeed" (any even-length byte sequence is valid
-                // UTF-16 code units) while producing garbled non-text. Prefer
-                // this result only when it looks like real text; otherwise
-                // fall through to the UTF-8 attempt below.
                 let non_ascii_ratio =
                     s.chars().filter(|c| !c.is_ascii()).count() as f64 / s.chars().count().max(1) as f64;
-                if non_ascii_ratio < 0.2 {
+                if non_ascii_ratio < UTF16_TEXT_MAX_NON_ASCII_RATIO {
                     return Some(s);
                 }
             }
@@ -226,8 +134,6 @@ fn decode_one_encoded_command(text: &str) -> Option<String> {
     None
 }
 
-/// Minimal standard-alphabet base64 decoder (RFC 4648, with padding) --
-/// avoids pulling in a dependency for the one narrow use above.
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
     fn val(c: u8) -> Option<u8> {
         match c {
@@ -283,10 +189,6 @@ fn shannon_entropy(s: &str) -> f64 {
         .sum()
 }
 
-/// True if `s` contains a long contiguous run of base64/hex-alphabet
-/// characters -- the generic signature of an embedded encoded payload
-/// (staged shellcode, an encrypted config blob, a packed second stage),
-/// regardless of what family produced it.
 fn has_long_encoded_blob(s: &str) -> Option<usize> {
     let mut best = 0usize;
     let mut cur = 0usize;
@@ -300,22 +202,15 @@ fn has_long_encoded_blob(s: &str) -> Option<usize> {
             cur = 0;
         }
     }
-    if best >= 120 {
+    if best >= LONG_ENCODED_BLOB_MIN_RUN {
         Some(best)
     } else {
         None
     }
 }
 
-/// Shape-based detection of an obfuscated inline payload passed via
-/// -e/-c/--eval/-enc to an interpreter. Structural, not a signature match:
-/// scores on length, Shannon entropy (obfuscated/packed/encrypted content
-/// reads at a distinctly higher bits-per-char than natural source code),
-/// embedded IP/URL literals, a long encoded-blob run, and only a small
-/// bonus for known generic markers -- a completely novel payload with none
-/// of the marker strings can still score purely on shape.
 pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdict> {
-    if cmdline.len() < 300 {
+    if cmdline.len() < MIN_INLINE_PAYLOAD_CMDLINE_LEN {
         return None;
     }
     let has_inline_flag = cmdline.contains("-e ")
@@ -329,31 +224,17 @@ pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdic
         return None;
     }
 
-    // A successfully-decoded -EncodedCommand/-enc payload is scored on its
-    // DECODED content, not the base64 wrapper -- see decode_encoded_command's
-    // own doc comment for the false-positive class this closes (the wrapper
-    // itself trivially satisfies both the obfuscation-marker check and the
-    // long-encoded-blob check for EVERY encoded command regardless of what's
-    // inside, since that's mechanically what base64-encoding produces; a
-    // completely benign `cd C:\dev\...` and a real attacker's payload both
-    // scored identically on the wrapper alone). Falls back to scoring the
-    // raw cmdline when decoding fails (a malformed/partial argument, e.g.
-    // this tool's own 200-char cmdline_head truncation cutting mid-base64)
-    // so nothing goes unscored just because a real payload got cut off.
     let scored_text = decode_encoded_command(cmdline, max_decode_depth).unwrap_or_else(|| cmdline.to_string());
     let scored: &str = &scored_text;
 
     let mut score = 0u32;
     let mut reasons = Vec::new();
-    // Tracks whether a signal harder to trigger by accident than either
-    // length or entropy alone has fired -- see the entropy-gating comment
-    // below for why length doesn't count.
     let mut has_strong_signal = false;
 
-    if cmdline.len() > 2000 {
+    if cmdline.len() > VERY_LONG_CMDLINE_LEN {
         score += 2;
         reasons.push(format!("very long command line ({} chars)", cmdline.len()));
-    } else if cmdline.len() > 600 {
+    } else if cmdline.len() > LONG_CMDLINE_LEN {
         score += 1;
         reasons.push(format!("long command line ({} chars)", cmdline.len()));
     }
@@ -391,7 +272,7 @@ pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdic
         .filter(|c| !c.is_alphanumeric() && !c.is_whitespace())
         .count();
     let density = symbol_count as f64 / scored.len().max(1) as f64;
-    if density > 0.30 {
+    if density > HIGH_SYMBOL_DENSITY_RATIO {
         score += 1;
         reasons.push(format!(
             "high symbol density ({:.0}%, obfuscated-code shape)",
@@ -400,54 +281,22 @@ pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdic
         has_strong_signal = true;
     }
 
-    // Entropy is scored LAST and only counts toward the alert threshold if
-    // at least one of the signals above already fired -- length alone does
-    // NOT count as corroboration (has_strong_signal is never set by the
-    // length check), since any legitimately verbose script clears 600
-    // chars on its own. Live-witnessed false-positive class: ordinary
-    // dense-but-harmless JS (this project's own `node -e` snippets reading/
-    // parsing local .gm/exec-spool/*.json files) routinely crosses 5.2
-    // bits/char on content alone -- 4 separate CRITICALs, all score=3,
-    // entropy the ONLY reason, zero IP/URL/blob/marker/density
-    // corroboration. The real Discord C2 incident this detector caught, by
-    // contrast, always scored 10 with 5+ signals stacked (IP + URL +
-    // entropy + eval/base64 markers + symbol density) -- entropy was never
-    // the sole or deciding signal for the real attack, so requiring
-    // corroboration here doesn't touch that detection at all, only closes
-    // the entropy-alone false-positive gap. Nothing here changes severity:
-    // anything that still crosses the score>=3 bar fires CRITICAL exactly
-    // as before.
     let entropy = shannon_entropy(scored);
-    if entropy > 5.2 && has_strong_signal {
+    if entropy > PACKED_ENTROPY_BITS_PER_CHAR && has_strong_signal {
         score += 3;
         reasons.push(format!("high content entropy ({entropy:.2} bits/char, packed/encrypted-looking)"));
-    } else if entropy > 4.7 && has_strong_signal {
+    } else if entropy > ELEVATED_ENTROPY_BITS_PER_CHAR && has_strong_signal {
         score += 1;
         reasons.push(format!("elevated content entropy ({entropy:.2} bits/char)"));
     }
 
-    if score >= 3 {
+    if score >= COMMAND_LINE_ALERT_SCORE {
         Some(Verdict { score, reasons })
     } else {
         None
     }
 }
 
-/// True if `s` contains a run of 4 or more CONSECUTIVE `\uXXXX` escapes
-/// (no other characters between them) that decode to plain ASCII
-/// identifier-shaped characters (letters, digits, underscore/dollar --
-/// i.e. what a JS identifier is actually made of). Real source code almost
-/// never spells an ASCII identifier this way -- `requ`
-/// decodes to "requ" and is dramatically harder to read/write/diff than
-/// just typing `requ`, so nobody does it by hand and no legitimate
-/// minifier/bundler emits it either (minifiers escape only what actually
-/// needs escaping: non-ASCII, or ASCII that would break the string
-/// literal). Malware hides module names this way specifically so a
-/// plain-text grep for "require"/"child_process"/"process.env" etc. finds
-/// nothing -- the identifier only exists as ASCII after JS's own runtime
-/// unescapes it. Structural, not tied to any specific hidden module name:
-/// a NEW hidden identifier this tool has never seen still gets caught on
-/// shape alone.
 pub fn find_hidden_unicode_escape_run(s: &str) -> Option<Verdict> {
     let bytes = s.as_bytes();
     let mut i = 0usize;
@@ -466,12 +315,6 @@ pub fn find_hidden_unicode_escape_run(s: &str) -> Option<Verdict> {
                 let Some(ch) = char::from_u32(code) else {
                     break;
                 };
-                // Only count escapes decoding to a plain-ASCII identifier
-                // character -- this is what distinguishes "hiding an
-                // identifier" from ordinary internationalized string
-                // content (a genuinely non-ASCII string legitimately
-                // escaped, e.g. CJK/emoji, decodes to non-ASCII and never
-                // triggers this).
                 if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '$') {
                     break;
                 }
@@ -479,7 +322,7 @@ pub fn find_hidden_unicode_escape_run(s: &str) -> Option<Verdict> {
                 run_len += 1;
                 j += 6;
             }
-            if run_len >= 4 {
+            if run_len >= HIDDEN_UNICODE_ESCAPE_MIN_RUN {
                 let starts_identifier_like = decoded
                     .chars()
                     .next()
@@ -499,54 +342,27 @@ pub fn find_hidden_unicode_escape_run(s: &str) -> Option<Verdict> {
     }
 
     best.map(|(run_len, decoded)| Verdict {
-        score: 5,
+        score: HIDDEN_UNICODE_ESCAPE_SCORE,
         reasons: vec![format!(
             "{run_len} consecutive \\uXXXX escapes decode to plain-ASCII identifier \"{decoded}\" -- real code never spells an ASCII identifier this way; this is how malware hides module/function names from plain-text grep"
         )],
     })
 }
 
-/// Byte-size threshold above which a "small config file" is suspiciously
-/// large -- part of the HiddenSpawn-family structural tell (see
-/// find_config_payload_disproportion doc).
 const CONFIG_PAYLOAD_MIN_BYTES: usize = 3000;
 
-/// Line-count ceiling below which a file of CONFIG_PAYLOAD_MIN_BYTES+ is
-/// suspiciously few lines for its size.
 const CONFIG_PAYLOAD_MAX_LINES: usize = 50;
 
-/// Literal runtime markers seen in the HiddenSpawn supply-chain malware
-/// family (obfuscator.io-style dispatch, on-chain C2 resolution, detached
-/// respawn persistence). Narrow and specific on purpose -- unlike
-/// OBFUSCATION_MARKERS above, these are exact strings unlikely to appear in
-/// any legitimate code, so a hit here is treated as much stronger evidence
-/// than a generic obfuscation marker. Cheap plain-substring search, no
-/// regex, since none of these need pattern matching.
 const HIDDEN_SPAWN_MARKERS: &[&str] = &[
     "global['_t_s']",
     "global._t_s",
     "_0x1706(",
     "x-payload-",
     "createGunzip",
-    // 2026-09 AnEntrypoint incident: the packer stamps a one-character
-    // global bang-key then a 30k+ obfuscator.io IIFE. The campaign id
-    // after the bang changes; the `global['!']` assignment does not.
     "global['!']",
     "global[\"!\"]",
 ];
 
-/// Structural tell for the HiddenSpawn supply-chain malware family: a
-/// build/config file (vite.config.js, webpack.config.js, etc. -- normally a
-/// handful of lines) whose actual byte size is disproportionate to its line
-/// count. The payload is appended as ONE extremely long whitespace-padded
-/// line after the real end of the file -- invisible in a normal editor or
-/// diff view unless file size is checked, since line-based tools never
-/// render or highlight the tail of a single enormous line. Survives the
-/// literal C2 address/wallet/obfuscation-function-name changing in each new
-/// variant, unlike a pure signature grep. Combined here with a check for the
-/// family's known runtime markers (HIDDEN_SPAWN_MARKERS) as corroborating
-/// (not required) evidence -- the size/line disproportion alone is already
-/// sufficient to flag, since no legitimate small config file has this shape.
 pub fn find_config_payload_disproportion(content: &str) -> Option<Verdict> {
     let bytes = content.len();
     if bytes < CONFIG_PAYLOAD_MIN_BYTES {
@@ -560,27 +376,18 @@ pub fn find_config_payload_disproportion(content: &str) -> Option<Verdict> {
     let mut reasons = vec![format!(
         "{bytes} bytes across only {lines} line(s) -- a build/config file this size normally has far more lines; a payload appended as one long padded line is invisible in normal diffs/editors"
     )];
-    let mut score = 6;
+    let mut score = CONFIG_PAYLOAD_SCORE_BASE;
     for marker in HIDDEN_SPAWN_MARKERS {
         if content.contains(marker) {
             reasons.push(format!("contains known HiddenSpawn-family runtime marker \"{marker}\""));
-            score += 4;
+            score += HIDDEN_SPAWN_MARKER_SCORE_BONUS;
         }
     }
     Some(Verdict { score, reasons })
 }
 
-/// Minimum last-line length for an appended packed IIFE. Real source does
-/// not end on a single 3k+ character line of `_0x` dispatcher soup; the
-/// HiddenSpawn family pads the payload onto the last line so line-based
-/// diffs and editors never show it. Independent of whether the file is a
-/// `*.config.*` (the 2026-09 wave appended to `index.js` / `flatspace.config.mjs`
-/// as well as to vite-style configs).
 const APPENDED_PACKED_MIN_TAIL_BYTES: usize = 3000;
 
-/// True when `line` looks like an obfuscator.io-style packed IIFE rather
-/// than a minified-but-legitimate bundle: a `global['!']` stamp, or a
-/// `var _0x…=(function(` dispatcher occupying the whole tail.
 fn line_looks_like_packed_iife(line: &str) -> bool {
     if line.contains("global['!']") || line.contains("global[\"!\"]") {
         return true;
@@ -588,12 +395,6 @@ fn line_looks_like_packed_iife(line: &str) -> bool {
     line.contains("var _0x") && (line.contains("(function(") || line.contains("(function ("))
 }
 
-/// Packed payload on ANY JS-family file, not just `*.config.*`.
-/// The config-file disproportion check above misses `index.js` because that
-/// file already has hundreds of real lines. Live 2026-09 acptoapi: the
-/// 39k-byte IIFE sat on line 224 with a trailing `}` after it, so "last
-/// line only" is blind. Any single line over APPENDED_PACKED_MIN_TAIL_BYTES
-/// that looks like a packed IIFE is the tell.
 pub fn find_appended_packed_payload(content: &str) -> Option<Verdict> {
     let (idx, line) = content
         .lines()
@@ -605,23 +406,19 @@ pub fn find_appended_packed_payload(content: &str) -> Option<Verdict> {
         idx + 1,
         line.len()
     )];
-    let mut score = 8;
+    let mut score = PACKED_IIFE_SCORE_BASE;
     for marker in HIDDEN_SPAWN_MARKERS {
         if line.contains(marker) {
             reasons.push(format!("contains known HiddenSpawn-family runtime marker \"{marker}\""));
-            score += 4;
+            score += HIDDEN_SPAWN_MARKER_SCORE_BONUS;
         }
     }
     Some(Verdict { score, reasons })
 }
 
-/// Font/image magic that a real asset of that extension always starts with.
-/// JS stuffed into `fa-solid-400.woff2` starts with ASCII `global[` / `var `
-/// instead -- the 2026-09 wave's second delivery vehicle, which a JS-only
-/// walk never opens because the extension is not JS.
 fn skip_utf8_bom_and_ws(data: &[u8]) -> &[u8] {
-    let data = if data.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        &data[3..]
+    let data = if data.starts_with(&UTF8_BOM) {
+        &data[UTF8_BOM.len()..]
     } else {
         data
     };
@@ -654,26 +451,22 @@ fn bytes_look_like_javascript(data: &[u8]) -> bool {
     PREFIXES.iter().any(|p| data.starts_with(p))
 }
 
-/// A file whose extension claims to be a font/image but whose first bytes
-/// are JavaScript. Shape, not a filename denylist: any `*.woff2` that
-/// begins `global['!']` is the same tell whether or not it is named
-/// `fa-solid-400`.
 pub fn find_javascript_masquerading_as_asset(data: &[u8]) -> Option<Verdict> {
-    if data.len() < 32 || !bytes_look_like_javascript(data) {
+    if data.len() < ASSET_MIN_BYTES_FOR_JS_CHECK || !bytes_look_like_javascript(data) {
         return None;
     }
     let head = skip_utf8_bom_and_ws(data);
-    let preview_len = head.len().min(48);
+    let preview_len = head.len().min(ASSET_JS_PREVIEW_MAX_BYTES);
     let preview = String::from_utf8_lossy(&head[..preview_len]);
     let mut reasons = vec![format!(
         "asset/font/image bytes begin as JavaScript ({preview:?}) -- real woff2/ttf/png never start this way"
     )];
-    let mut score = 9;
+    let mut score = JS_MASQUERADING_AS_ASSET_SCORE_BASE;
     if let Ok(text) = std::str::from_utf8(data) {
         for marker in HIDDEN_SPAWN_MARKERS {
             if text.contains(marker) {
                 reasons.push(format!("contains known HiddenSpawn-family runtime marker \"{marker}\""));
-                score += 4;
+                score += HIDDEN_SPAWN_MARKER_SCORE_BONUS;
             }
         }
     }
@@ -685,39 +478,12 @@ fn backup_suffix_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)\.(orig|bak|inz|original|old)(\.[A-Za-z0-9]+)?$").unwrap())
 }
 
-/// True for a filename shaped like an infector's own preserved-backup
-/// sibling (*.orig, *.bak, *.inz, *.original, *.old, optionally with one
-/// more trailing extension e.g. *.inz.orig) -- the exact shape a
-/// bootstrap-hijack leaves behind to keep the original around while it
-/// overwrites the real entry point. Single source of truth shared by the
-/// live file watcher (watch_file::check_backup_sibling), the proactive
-/// Electron/VSCode-family sweep (electron_sweep), and the one-shot
-/// remediation pairing (scan_js::find_remediation_candidates) so all three
-/// agree on exactly one definition of "backup-sibling-shaped" instead of
-/// three independently-maintained regexes silently drifting apart.
 pub fn is_backup_sibling_name(file_name: &str) -> bool {
     backup_suffix_re().is_match(file_name)
 }
 
-/// Backup-marker suffixes recognized by `is_backup_sibling_name` above,
-/// listed individually (not derived from that regex) so
-/// `strip_backup_markers` can peel them off one layer at a time.
 const BACKUP_MARKER_SUFFIXES: &[&str] = &[".orig", ".bak", ".original", ".old", ".inz"];
 
-/// Strips trailing backup-marker suffixes from a filename, one layer at a
-/// time, to recover the live file it is a preserved copy of: turns
-/// "index.js.orig" into "index.js", and a doubled marker like
-/// "index.js.inz.orig" into "index.js" too. A name with NO recognized
-/// marker suffix at the very end -- e.g. a real payload filename like
-/// "index.inz.cjs", which ends in ".cjs", not one of these markers -- is
-/// returned completely unchanged, so it is deliberately never mistaken for
-/// a preserved-original candidate just because "inz" appears in it
-/// somewhere. Live-witnessed incident shape: the 2026-09 Antigravity/
-/// Discord compromise both preserved the real bootstrap file under a
-/// `.orig`-style sibling while separately dropping its own payload under an
-/// unrelated `*.inz.cjs`-shaped name -- this function must tell those two
-/// apart by suffix shape alone, since both can be present in the same
-/// directory at once.
 pub fn strip_backup_markers(name: &str) -> String {
     let mut current = name.to_string();
     loop {
@@ -730,8 +496,6 @@ pub fn strip_backup_markers(name: &str) -> String {
     current
 }
 
-/// True if `exe_path` sits under any deny fragment (e.g. Recycle Bin, Trash)
-/// -- an instant, unconditional flag regardless of process name.
 pub fn is_denied_exec_path(exe_path: &str, deny_fragments: &[String]) -> Option<&'static str> {
     for frag in deny_fragments {
         if exe_path.contains(frag.as_str()) {
@@ -741,9 +505,6 @@ pub fn is_denied_exec_path(exe_path: &str, deny_fragments: &[String]) -> Option<
     None
 }
 
-/// True if `exe_path` is NOT under any of the allowed roots. This is a
-/// softer WARN-tier signal (a real allowlist will always have gaps for
-/// unusual-but-legitimate install locations), unlike the deny check above.
 pub fn is_unlisted_exec_path(exe_path: &str, allowed_roots: &[std::path::PathBuf]) -> bool {
     let exe_lower = exe_path.to_lowercase();
     !allowed_roots.iter().any(|root| {
@@ -753,19 +514,6 @@ pub fn is_unlisted_exec_path(exe_path: &str, allowed_roots: &[std::path::PathBuf
         && !is_compiler_build_artifact_path(&exe_lower)
 }
 
-/// True if `exe_path` sits inside a Cargo/Rust build-output tree
-/// (`target/{debug,release}/{build,deps}/...`) under ANY project directory
-/// -- these can't be absolute-prefix allowlisted the way a fixed system
-/// location can, since `target/` legitimately appears under every one of
-/// a developer's many project directories. Live-witnessed: `cargo build`
-/// generates a fresh, content-hashed binary name under `target/*/build/`
-/// on every build (build-script-build.exe, and crate-name-<hash>.exe test
-/// binaries under `target/*/deps/`) -- a real allowlist-by-exact-path can
-/// never keep up with this, and it's the single most common WARN-tier
-/// process-path noise source for anyone doing Rust development. Never a
-/// meaningful hiding spot for real persistence either: `target/` is wiped
-/// by `cargo clean` and regenerated by every build, the opposite of a
-/// durable location an attacker would plant something in.
 pub fn is_compiler_build_artifact_path(exe_lower: &str) -> bool {
     let target_marker = if exe_lower.contains('\\') { "\\target\\" } else { "/target/" };
     let Some(after_target) = exe_lower.split(target_marker).nth(1) else {
@@ -780,16 +528,7 @@ pub fn is_compiler_build_artifact_path(exe_lower: &str) -> bool {
     matches!(segments.next(), Some("build" | "deps"))
 }
 
-/// Well-known process names and the path fragment their REAL binary always
-/// lives under. A process claiming one of these exact names but running
-/// from somewhere else is classic masquerading (naming a malicious binary
-/// after a trusted system process so it blends into a process list at a
-/// glance, while actually running from Temp/AppData/Downloads/a Recycle Bin
-/// path). Covers the most commonly impersonated names across all three
-/// platforms per public threat-intel reporting on this technique -- not
-/// tied to any one runtime or app, general system-process masquerading.
 const KNOWN_NAME_HOMES: &[(&str, &[&str])] = &[
-    // Windows core system processes -- the classic masquerading targets.
     ("svchost.exe", &["\\windows\\system32", "\\windows\\syswow64"]),
     ("explorer.exe", &["\\windows"]),
     ("csrss.exe", &["\\windows\\system32"]),
@@ -806,7 +545,6 @@ const KNOWN_NAME_HOMES: &[(&str, &[&str])] = &[
     ("conhost.exe", &["\\windows\\system32"]),
     ("lsm.exe", &["\\windows\\system32"]),
     ("searchindexer.exe", &["\\windows"]),
-    // Common third-party runtimes -- their real install roots.
     (
         "node.exe",
         &[
@@ -814,37 +552,23 @@ const KNOWN_NAME_HOMES: &[(&str, &[&str])] = &[
             "\\program files\\nodejs",
             "appdata\\roaming\\nvm",
             "appdata\\local\\fnm",
-            // Adobe Creative Cloud Experience bundles its own signed
-            // Node.js runtime for internal tooling at this exact path --
-            // live-verified (Get-AuthenticodeSignature: Valid; a genuine
-            // Node.js 18.20.2 binary, not a masquerade) after it recurred
-            // at the identical time of day (09:32:02) on two different
-            // days, matching a scheduled Adobe background task rather than
-            // a one-off.
-            "\\adobe\\adobe creative cloud experience\\libs",
+            ADOBE_CREATIVE_CLOUD_BUNDLED_NODE_HOME,
         ],
     ),
     ("node", &["/usr/", "/opt/", "/.nvm/", "/.fnm/", "/.local/"]),
     ("python.exe", &["\\python", "\\program files"]),
     ("chrome.exe", &["\\google\\chrome", "\\program files"]),
     ("discord.exe", &["\\discord\\app-"]),
-    // macOS system daemons.
     ("launchd", &["/sbin/", "/usr/libexec/"]),
     ("kernel_task", &["/System/"]),
     ("windowserver", &["/system/library/"]),
     ("coreaudiod", &["/usr/sbin/"]),
-    // Linux init/system daemons.
     ("systemd", &["/usr/lib/systemd/", "/lib/systemd/", "/sbin/"]),
     ("init", &["/sbin/", "/usr/sbin/"]),
     ("sshd", &["/usr/sbin/", "/usr/bin/"]),
     ("cron", &["/usr/sbin/"]),
 ];
 
-/// Detects both: (1) a well-known name running from an unexpected location,
-/// and (2) "weird characters" in the process name -- non-ASCII confusables
-/// (Cyrillic/Greek lookalikes for Latin letters), zero-width/control
-/// characters, or RTL override marks, all real techniques for visually
-/// disguising a malicious binary as something benign in a process listing.
 pub fn score_process_name(name: &str, exe_path: &str) -> Option<Verdict> {
     let mut score = 0u32;
     let mut reasons = Vec::new();

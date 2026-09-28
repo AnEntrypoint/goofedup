@@ -1,12 +1,3 @@
-// Persistence audit: services, scheduled tasks/cron, and login-item
-// autostart entries. This is the layer that would have caught the real
-// incident fastest -- a malicious payload that respawns needs to register
-// SOMEWHERE durable, and every OS's durable-registration surfaces are a
-// short, enumerable list. Runs a full audit at startup, then re-audits on
-// the same poll interval as the process watcher and diffs against the
-// previous snapshot so a NEWLY REGISTERED entry (not just "any entry exists,
-// noisy on first run") is what actually triggers an alert.
-
 use crate::alert::AlertSink;
 use crate::config::{Config, SharedConfig};
 use crate::heuristics::{is_denied_exec_path, score_command_line};
@@ -15,9 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+const POLL_INTERVAL_MULTIPLIER: u64 = 10;
+const COLLAPSED_ENUMERATION_DIVISOR: usize = 2;
+
+fn enumeration_looks_collapsed(current_len: usize, baseline_len: usize) -> bool {
+    baseline_len != 0 && current_len * COLLAPSED_ENUMERATION_DIVISOR < baseline_len
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PersistenceEntry {
-    pub kind: &'static str, // "service" | "scheduled-task" | "login-item" | "cron" | "launchd"
+    pub kind: &'static str,
     pub name: String,
     pub command: String,
 }
@@ -35,20 +33,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
         let cfg = cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
         let current = enumerate();
 
-        // A transient PowerShell/WMI hiccup (timeout, busy system, etc.)
-        // makes enumerate() silently return a near-empty list -- with no
-        // guard, that collapses `known` down to almost nothing, and the
-        // NEXT successful poll then sees every real, pre-existing service
-        // as "new" simultaneously and floods hundreds of false positives.
-        // Live-witnessed: 2026-09-02, ~230 entirely ordinary services
-        // (Steam, VBox, WSL, Windows core services, ...) all fired as
-        // "new service registered" in one poll with no intervening
-        // baseline-capture log, meaning one bad poll wiped the baseline.
-        // A real, non-transient drop in the machine's own persistence
-        // surface (services actually uninstalled) is rare and never this
-        // drastic, so treating a big shrink as a failed poll and skipping
-        // the diff (keeping the last-known-good baseline) is safe.
-        if !first_pass && !known.is_empty() && current.len() * 2 < known.len() {
+        if !first_pass && enumeration_looks_collapsed(current.len(), known.len()) {
             alerts.warn(
                 "persistence",
                 format!(
@@ -58,7 +43,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
                 ),
                 String::new(),
             );
-            std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs * 10));
+            std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs * POLL_INTERVAL_MULTIPLIER));
             continue;
         }
 
@@ -78,7 +63,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
         known = current_map;
         first_pass = false;
 
-        std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs * 10));
+        std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs * POLL_INTERVAL_MULTIPLIER));
     }
 }
 
@@ -111,10 +96,6 @@ fn inspect_new_entry(cfg: &Config, alerts: &AlertSink, entry: &PersistenceEntry)
     if level_critical {
         alerts.critical("persistence-new", message, evidence);
     } else {
-        // Any new persistence registration is worth a human glance even
-        // without a matched heuristic -- most are legitimate installs, but
-        // this is exactly the surface a quiet implant abuses, so it stays
-        // WARN rather than silent.
         alerts.warn("persistence-new", message, evidence);
     }
 }
@@ -148,11 +129,6 @@ mod windows_impl {
         RegCloseKey, RegEnumValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE, REG_SZ,
     };
 
-    // Windows allocates a fresh visible console window for any
-    // console-subsystem child process spawned by a process that has none of
-    // its own (goofedup-gui.exe is windows_subsystem=windows) unless this
-    // flag is passed to CreateProcess -- every remaining Command::new in
-    // this module needs it or the tray GUI flashes a console on each audit.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     pub fn enumerate() -> Vec<PersistenceEntry> {
@@ -164,10 +140,6 @@ mod windows_impl {
     }
 
     fn services() -> Vec<PersistenceEntry> {
-        // `sc query` lists names only; the binary path needs a per-service
-        // qc call which is expensive at scale, so services are tracked by
-        // name+state here -- a NEW service name is itself the signal; a
-        // human reviewing the alert runs the suggested `sc qc` for the path.
         let out = Command::new("powershell")
             .args([
                 "-NoProfile",
@@ -192,10 +164,6 @@ mod windows_impl {
     }
 
     fn run_keys() -> Vec<PersistenceEntry> {
-        // Native RegEnumValueW replaces the prior Get-ItemProperty
-        // powershell shell-out entirely -- same registry data, zero
-        // process spawn, zero console-flash risk. Pattern mirrors
-        // src/gui/autostart.rs's existing RegOpenKeyExW usage.
         let mut out = Vec::new();
         for (hive, hive_name) in [(HKEY_CURRENT_USER, "HKCU"), (HKEY_LOCAL_MACHINE, "HKLM")] {
             out.extend(enum_run_key_values(hive, hive_name));
@@ -331,20 +299,7 @@ mod macos_impl {
                 .unwrap_or_default();
             let command = fs::read_to_string(&path)
                 .ok()
-                .and_then(|content| {
-                    // Cheap extraction, not a real plist parser: pull the
-                    // first <string> after ProgramArguments as a best-effort
-                    // command summary for the alert evidence -- good enough
-                    // to show a human what's registered without pulling in
-                    // a plist crate for a summary field.
-                    content
-                        .find("ProgramArguments")
-                        .and_then(|i| content[i..].find("<string>").map(|j| i + j))
-                        .and_then(|i| {
-                            let rest = &content[i + 8..];
-                            rest.find("</string>").map(|j| rest[..j].to_string())
-                        })
-                })
+                .and_then(|content| first_string_after_program_arguments(&content))
                 .unwrap_or_default();
             out.push(PersistenceEntry {
                 kind: "launchd",
@@ -353,6 +308,17 @@ mod macos_impl {
             });
         }
         out
+    }
+
+    fn first_string_after_program_arguments(content: &str) -> Option<String> {
+        const STRING_OPEN_TAG: &str = "<string>";
+        content
+            .find("ProgramArguments")
+            .and_then(|i| content[i..].find(STRING_OPEN_TAG).map(|j| i + j))
+            .and_then(|i| {
+                let rest = &content[i + STRING_OPEN_TAG.len()..];
+                rest.find("</string>").map(|j| rest[..j].to_string())
+            })
     }
 
     fn login_items() -> Vec<PersistenceEntry> {

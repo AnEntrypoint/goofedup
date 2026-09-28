@@ -1,12 +1,20 @@
-// Tray icon rendered at runtime instead of shipping a static .ico -- a
-// shield silhouette (the conventional "protection" glyph) with a coverage
-// arc suggesting an eye, anti-aliased at the edge. Color communicates
-// state: cyan idle/watching, gray paused, red an unacknowledged Critical
-// alert is pending. Keeps the binary self-contained with no asset pipeline.
-
 use tray_icon::Icon;
 
 const SIZE: u32 = 32;
+
+const CRITICAL_RGB: (u8, u8, u8) = (220, 38, 38);
+const PAUSED_RGB: (u8, u8, u8) = (120, 120, 120);
+const IDLE_RGB: (u8, u8, u8) = (14, 165, 233);
+
+const SUBPIXEL_SAMPLE_OFFSETS: [(f32, f32); 4] = [(-0.17, -0.17), (0.17, -0.17), (-0.17, 0.17), (0.17, 0.17)];
+
+const SHIELD_TOP_Y: f32 = 0.12;
+const SHIELD_BOTTOM_Y: f32 = 0.88;
+const SHIELD_TOP_HALF_WIDTH: f32 = 0.62;
+const SHIELD_BOTTOM_HALF_WIDTH: f32 = 0.05;
+const SHIELD_ROUNDED_TOP_HEIGHT: f32 = 0.13;
+const SHIELD_CORNER_START_RATIO: f32 = 0.86;
+const SHIELD_CORNER_RADIUS_SLACK: f32 = 0.02;
 
 pub enum IconState {
     Idle,
@@ -16,9 +24,9 @@ pub enum IconState {
 
 fn shield_rgba(state: &IconState) -> Vec<u8> {
     let (r, g, b) = match state {
-        IconState::Critical => (220u8, 38, 38),
-        IconState::Paused => (120u8, 120, 120),
-        IconState::Idle => (14u8, 165, 233),
+        IconState::Critical => CRITICAL_RGB,
+        IconState::Paused => PAUSED_RGB,
+        IconState::Idle => IDLE_RGB,
     };
 
     let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
@@ -111,48 +119,35 @@ pub fn shield_hicon(state: IconState) -> Option<windows::Win32::UI::WindowsAndMe
     }
 }
 
-/// Antialiased coverage (0.0..=1.0) of a shield silhouette at normalized
-/// point (u, v) in [0,1]x[0,1] -- a rounded-top rectangle tapering to a
-/// point at the bottom, the standard "protection" glyph shape. Computed as
-/// a signed-distance-ish approximation sampled at sub-pixel offsets rather
-/// than a true SDF, cheap enough to run per-pixel at tray resolution
-/// without a rasterization library dependency.
 fn shield_coverage(u: f32, v: f32) -> f32 {
-    const SAMPLES: [(f32, f32); 4] = [(-0.17, -0.17), (0.17, -0.17), (-0.17, 0.17), (0.17, 0.17)];
     let step = 1.0 / SIZE as f32;
     let mut hits = 0;
-    for (dx, dy) in SAMPLES {
+    for (dx, dy) in SUBPIXEL_SAMPLE_OFFSETS {
         if inside_shield(u + dx * step, v + dy * step) {
             hits += 1;
         }
     }
-    hits as f32 / SAMPLES.len() as f32
+    hits as f32 / SUBPIXEL_SAMPLE_OFFSETS.len() as f32
 }
 
 fn inside_shield(u: f32, v: f32) -> bool {
-    // Shield spans roughly x in [0.2,0.8], y in [0.12,0.88] of the icon,
-    // rounded top, tapering to a point at the bottom.
-    let x = (u - 0.5) * 2.0; // -1..1
+    let x = (u - 0.5) * 2.0;
     let y = v;
-    if y < 0.12 || y > 0.88 {
+    if y < SHIELD_TOP_Y || y > SHIELD_BOTTOM_Y {
         return false;
     }
-    let top_half_width = 0.62;
-    let bottom_half_width = 0.05;
-    let taper = ((y - 0.12) / (0.88 - 0.12)).clamp(0.0, 1.0);
-    let half_width = top_half_width * (1.0 - taper) + bottom_half_width * taper;
+    let taper = ((y - SHIELD_TOP_Y) / (SHIELD_BOTTOM_Y - SHIELD_TOP_Y)).clamp(0.0, 1.0);
+    let half_width = SHIELD_TOP_HALF_WIDTH * (1.0 - taper) + SHIELD_BOTTOM_HALF_WIDTH * taper;
     if x.abs() > half_width {
         return false;
     }
-    // Round the top corners: within the top 15% of height, additionally
-    // require distance from the nearest top corner to stay within radius.
-    if y < 0.12 + 0.13 {
-        let corner_y = 0.12 + 0.13;
-        let corner_x = half_width * 0.86;
+    if y < SHIELD_TOP_Y + SHIELD_ROUNDED_TOP_HEIGHT {
+        let corner_y = SHIELD_TOP_Y + SHIELD_ROUNDED_TOP_HEIGHT;
+        let corner_x = half_width * SHIELD_CORNER_START_RATIO;
         if x.abs() > corner_x {
             let dx = x.abs() - corner_x;
             let dy = corner_y - y;
-            let radius = half_width - corner_x + 0.02;
+            let radius = half_width - corner_x + SHIELD_CORNER_RADIUS_SLACK;
             if dx * dx + dy * dy > radius * radius {
                 return false;
             }
