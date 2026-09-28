@@ -1,4 +1,5 @@
 pub mod alert;
+pub mod audit_win;
 pub mod config;
 pub mod config_reload;
 #[cfg(feature = "gui")]
