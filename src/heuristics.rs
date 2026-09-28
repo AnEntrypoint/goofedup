@@ -631,12 +631,24 @@ fn skip_utf8_bom_and_ws(data: &[u8]) -> &[u8] {
 
 fn bytes_look_like_javascript(data: &[u8]) -> bool {
     let data = skip_utf8_bom_and_ws(data);
-    const PREFIXES: [&[u8]; 6] = [
+    const PREFIXES: &[&[u8]] = &[
         b"global[",
         b"global.",
         b"var _0x",
+        b"const _0x",
+        b"let _0x",
         b"(function(",
         b"(function (",
+        b"(async function",
+        b"(async()=>",
+        b"(()=>",
+        b"!function(",
+        b"\"use strict\"",
+        b"'use strict'",
+        b"require(",
+        b"module.exports",
+        b"eval(",
+        b"#!/usr/bin/env node",
         b"/*! For license information",
     ];
     PREFIXES.iter().any(|p| data.starts_with(p))

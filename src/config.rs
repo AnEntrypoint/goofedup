@@ -228,6 +228,8 @@ pub struct Config {
     /// a non-admin install of an app like Antigravity/Cursor/VS Code lands
     /// without ever touching Program Files.
     pub electron_sweep_roots: Vec<PathBuf>,
+
+    pub repo_watch_roots: Vec<PathBuf>,
 }
 
 pub struct BootstrapEntry {
@@ -280,6 +282,7 @@ pub struct ConfigOverrides {
     pub electron_sweep_enabled: Option<bool>,
     pub electron_sweep_interval_secs: Option<u64>,
     pub electron_sweep_roots: Option<Vec<PathBuf>>,
+    pub repo_watch_roots: Option<Vec<PathBuf>>,
 }
 
 #[derive(Deserialize)]
@@ -384,6 +387,9 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     }
     if let Some(v) = &o.electron_sweep_roots {
         base.electron_sweep_roots = v.clone();
+    }
+    if let Some(v) = &o.repo_watch_roots {
+        base.repo_watch_roots = v.clone();
     }
     base
 }
@@ -636,6 +642,19 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
                 }));
                 rows
             },
+        },
+        ConfigSection {
+            title: "Repo Compromise Watch",
+            description: "Dev roots watched recursively for a hidden .vscode/tasks.json auto-run task, task.allowAutomaticTasks in workspace settings, a payload-hiding .gitignore entry, a package.json lifecycle dropper, a tampered *.config.js, a risky workflow or git hook, or JavaScript disguised as a font/image -- checked within a couple of seconds of the file changing.",
+            rows: cfg
+                .repo_watch_roots
+                .iter()
+                .enumerate()
+                .map(|(i, r)| ConfigRow {
+                    label: format!("Root {}", i + 1),
+                    value: marked(r.display().to_string(), overrides.repo_watch_roots.is_some()),
+                })
+                .collect(),
         },
     ]
 }
@@ -975,8 +994,18 @@ impl Config {
             // later.
             electron_sweep_interval_secs: 60 * 60,
             electron_sweep_roots,
+            repo_watch_roots: default_repo_watch_roots(&home),
         }
     }
+}
+
+fn default_repo_watch_roots(home: &std::path::Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    #[cfg(windows)]
+    roots.extend([r"C:\dev", r"D:\dev", r"C:\d"].map(PathBuf::from));
+    roots.extend(["dev", "src", "projects", "Documents"].map(|dir| home.join(dir)));
+    roots.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    roots
 }
 
 pub fn dirs_home() -> PathBuf {

@@ -1,4 +1,5 @@
 pub mod alert;
+pub mod command_shape;
 pub mod config;
 pub mod config_reload;
 pub mod correlate;
@@ -6,8 +7,12 @@ pub mod electron_sweep;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod heuristics;
+pub mod jsonc;
+pub mod repo_fix;
 pub mod scan_js;
+pub mod scan_repo;
 pub mod watch_file;
 pub mod watch_network;
 pub mod watch_persistence;
 pub mod watch_process;
+pub mod watch_repos;
