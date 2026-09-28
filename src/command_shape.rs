@@ -82,6 +82,16 @@ fn obfuscation_re() -> &'static Regex {
     })
 }
 
+fn inline_code_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r#"(?i)\b((?:node|nodejs|deno|bun)(?:\.exe)?[^&|;\n]*?\s(?:-e|--eval|-p|--print)|python[0-9.]*(?:\.exe)?[^&|;\n]*?\s-c)\s+("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')"#,
+        )
+        .unwrap()
+    })
+}
+
 pub fn pipes_download_to_interpreter(text: &str) -> bool {
     pipe_to_interpreter_re().is_match(text)
 }
@@ -229,13 +239,14 @@ fn analyze_segment(segment: &str, shape: &mut CommandShape) {
 }
 
 pub fn analyze(command: &str) -> CommandShape {
+    let redacted = inline_code_re().replace_all(command, "$1 INLINE").into_owned();
     let mut shape = CommandShape {
         downloads: download_re().is_match(command),
         pipes_download_to_interpreter: pipe_to_interpreter_re().is_match(command),
         obfuscated_execution: obfuscation_re().is_match(command),
         ..CommandShape::default()
     };
-    for segment in command.split(|c| matches!(c, '&' | '|' | ';' | '(' | ')' | '\n' | '\r' | '`')) {
+    for segment in redacted.split(|c| matches!(c, '&' | '|' | ';' | '(' | ')' | '\n' | '\r' | '`')) {
         analyze_segment(segment, &mut shape);
     }
     shape
