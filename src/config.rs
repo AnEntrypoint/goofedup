@@ -228,6 +228,7 @@ pub struct Config {
     /// a non-admin install of an app like Antigravity/Cursor/VS Code lands
     /// without ever touching Program Files.
     pub electron_sweep_roots: Vec<PathBuf>,
+    pub tamper: crate::tamper_config::TamperConfig,
 }
 
 pub struct BootstrapEntry {
@@ -280,6 +281,7 @@ pub struct ConfigOverrides {
     pub electron_sweep_enabled: Option<bool>,
     pub electron_sweep_interval_secs: Option<u64>,
     pub electron_sweep_roots: Option<Vec<PathBuf>>,
+    pub tamper: crate::tamper_config::TamperOverrides,
 }
 
 #[derive(Deserialize)]
@@ -385,6 +387,7 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     if let Some(v) = &o.electron_sweep_roots {
         base.electron_sweep_roots = v.clone();
     }
+    base.tamper = base.tamper.with_overrides(&o.tamper);
     base
 }
 
@@ -442,7 +445,7 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
         }
     }
 
-    vec![
+    let mut sections = vec![
         ConfigSection {
             title: "General",
             description: "Basic runtime info: where logs are written and how often the background watchers poll.",
@@ -637,7 +640,9 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
                 rows
             },
         },
-    ]
+    ];
+    sections.push(cfg.tamper.section(&overrides.tamper));
+    sections
 }
 
 fn format_bytes(b: u64) -> String {
@@ -975,6 +980,7 @@ impl Config {
             // later.
             electron_sweep_interval_secs: 60 * 60,
             electron_sweep_roots,
+            tamper: crate::tamper_config::TamperConfig::default(),
         }
     }
 }

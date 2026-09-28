@@ -1,4 +1,5 @@
 pub mod alert;
+pub mod audit_win;
 pub mod config;
 pub mod config_reload;
 pub mod correlate;
@@ -7,7 +8,9 @@ pub mod electron_sweep;
 pub mod gui;
 pub mod heuristics;
 pub mod scan_js;
+pub mod tamper_config;
 pub mod watch_file;
 pub mod watch_network;
 pub mod watch_persistence;
 pub mod watch_process;
+pub mod watch_tamper;

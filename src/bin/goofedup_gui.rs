@@ -12,7 +12,7 @@ use goofedup::gui::icon::IconState;
 use goofedup::gui::{alert_window, autostart, history::History, icon, single_instance, toast};
 use goofedup::{
     config_reload, correlate, electron_sweep, scan_js, watch_file, watch_network, watch_persistence,
-    watch_process,
+    watch_process, watch_tamper,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -405,6 +405,12 @@ fn spawn_watchers(
         let alerts = alerts.clone();
         let running = running.clone();
         std::thread::spawn(move || watch_network::run_firewall_drift(cfg, alerts, running));
+    }
+    {
+        let cfg = cfg.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        std::thread::spawn(move || watch_tamper::run(cfg, alerts, running));
     }
     {
         let cfg = cfg.clone();
