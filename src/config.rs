@@ -11,6 +11,7 @@
 // see config_reload.rs for the load/merge/reload-loop machinery built on
 // top of the types defined here.
 
+use crate::trust::UnsignedUserWritablePolicy;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -202,6 +203,8 @@ pub struct Config {
     /// not because any real legitimate or malicious sample observed so far
     /// has needed more than a couple of layers.
     pub c2_max_decode_depth: u32,
+    pub trusted_publishers: Vec<String>,
+    pub unsigned_user_writable_policy: UnsignedUserWritablePolicy,
 }
 
 pub struct BootstrapEntry {
@@ -251,6 +254,8 @@ pub struct ConfigOverrides {
     pub read_burst_baseline_warm_up_floor_bytes: Option<f64>,
     pub read_burst_ema_alpha: Option<f64>,
     pub c2_max_decode_depth: Option<u32>,
+    pub trusted_publishers: Option<Vec<String>>,
+    pub unsigned_user_writable_policy: Option<UnsignedUserWritablePolicy>,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +351,12 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     }
     if let Some(v) = o.c2_max_decode_depth {
         base.c2_max_decode_depth = v;
+    }
+    if let Some(v) = &o.trusted_publishers {
+        base.trusted_publishers = v.clone();
+    }
+    if let Some(v) = &o.unsigned_user_writable_policy {
+        base.unsigned_user_writable_policy = v.clone();
     }
     base
 }
@@ -464,7 +475,7 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
         },
         ConfigSection {
             title: "Allowed Exec Roots",
-            description: "Processes launching from one of these locations are treated as trusted and do not trigger the unusual-path warning -- launching from anywhere else still gets flagged for review, even a normally-legitimate install location, since a trusted location can still be compromised.",
+            description: "Where signature verification is unavailable (non-Windows) or the unsigned user-writable policy is off, processes launching from one of these locations do not trigger the unusual-path warning; the file-read-burst corroboration check always uses this list. On Windows with the policy on, user-writable roots listed here no longer imply trust -- see Signature Trust.",
             rows: cfg
                 .allowed_exec_roots
                 .iter()
@@ -577,6 +588,30 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
                 label: "Max decode depth".to_string(),
                 value: marked(cfg.c2_max_decode_depth.to_string(), overrides.c2_max_decode_depth.is_some()),
             }],
+        },
+        ConfigSection {
+            title: "Signature Trust",
+            description: "A process image in a user-writable location (AppData, Downloads, Temp, dev directories, anywhere outside the OS vendor roots) is only trusted when validly signed by one of these publishers, or when its exact SHA-256 is pinned. Unsigned images there warn, and escalate to CRITICAL with outbound public network traffic, an obfuscated command line, or a masquerading system-process name. Policy mode is warn, critical, or off (off falls back to the Allowed Exec Roots allowlist).",
+            rows: vec![
+                ConfigRow {
+                    label: "Trusted publishers".to_string(),
+                    value: marked(cfg.trusted_publishers.join(", "), overrides.trusted_publishers.is_some()),
+                },
+                ConfigRow {
+                    label: "Unsigned user-writable policy".to_string(),
+                    value: marked(
+                        cfg.unsigned_user_writable_policy.mode.label().to_string(),
+                        overrides.unsigned_user_writable_policy.is_some(),
+                    ),
+                },
+                ConfigRow {
+                    label: "Pinned unsigned SHA-256".to_string(),
+                    value: marked(
+                        cfg.unsigned_user_writable_policy.trusted_sha256.join(", "),
+                        overrides.unsigned_user_writable_policy.is_some(),
+                    ),
+                },
+            ],
         },
     ]
 }
@@ -895,6 +930,8 @@ impl Config {
             read_burst_baseline_warm_up_floor_bytes: 512.0 * 1024.0,
             read_burst_ema_alpha: 0.2,
             c2_max_decode_depth: 4,
+            trusted_publishers: crate::trust::default_trusted_publishers(),
+            unsigned_user_writable_policy: UnsignedUserWritablePolicy::default(),
         }
     }
 }

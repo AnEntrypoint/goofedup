@@ -54,6 +54,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
         std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs));
 
         let conns = list_connections();
+        crate::process_trust::on_connections(&alerts, &conns);
         let now = Instant::now();
 
         for c in &conns {
