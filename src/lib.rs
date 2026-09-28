@@ -11,3 +11,4 @@ pub mod watch_file;
 pub mod watch_network;
 pub mod watch_persistence;
 pub mod watch_process;
+pub mod watch_tamper;
