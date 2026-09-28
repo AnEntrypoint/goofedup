@@ -1,0 +1,276 @@
+<Sysmon schemaversion="4.91">
+  <HashAlgorithms>sha256,IMPHASH</HashAlgorithms>
+  <DnsLookup>False</DnsLookup>
+  <EventFiltering>
+    <RuleGroup name="ProcessCreate-include" groupRelation="or">
+      <ProcessCreate onmatch="include">
+        <Rule name="technique_id=T1566.001,technique_name=Spearphishing Attachment" groupRelation="and">
+          <Image condition="end with">\cmd.exe</Image>
+          <Image condition="end with">\powershell.exe</Image>
+          <Image condition="end with">\pwsh.exe</Image>
+          <Image condition="end with">\wscript.exe</Image>
+          <Image condition="end with">\cscript.exe</Image>
+          <Image condition="end with">\mshta.exe</Image>
+          <Image condition="end with">\rundll32.exe</Image>
+          <Image condition="end with">\regsvr32.exe</Image>
+          <Image condition="end with">\certutil.exe</Image>
+          <Image condition="end with">\bitsadmin.exe</Image>
+          <Image condition="end with">\msbuild.exe</Image>
+          <Image condition="end with">\installutil.exe</Image>
+          <Image condition="end with">\wmic.exe</Image>
+          <ParentImage condition="end with">\winword.exe</ParentImage>
+          <ParentImage condition="end with">\excel.exe</ParentImage>
+          <ParentImage condition="end with">\powerpnt.exe</ParentImage>
+          <ParentImage condition="end with">\outlook.exe</ParentImage>
+          <ParentImage condition="end with">\onenote.exe</ParentImage>
+          <ParentImage condition="end with">\msaccess.exe</ParentImage>
+          <ParentImage condition="end with">\mspub.exe</ParentImage>
+          <ParentImage condition="end with">\acrord32.exe</ParentImage>
+          <ParentImage condition="end with">\foxitreader.exe</ParentImage>
+          <ParentImage condition="end with">\wmiprvse.exe</ParentImage>
+          <ParentImage condition="end with">\w3wp.exe</ParentImage>
+          <ParentImage condition="end with">\sqlservr.exe</ParentImage>
+          <ParentImage condition="end with">\mshta.exe</ParentImage>
+          <ParentImage condition="end with">\wscript.exe</ParentImage>
+          <ParentImage condition="end with">\cscript.exe</ParentImage>
+          <ParentImage condition="end with">\chrome.exe</ParentImage>
+          <ParentImage condition="end with">\msedge.exe</ParentImage>
+          <ParentImage condition="end with">\firefox.exe</ParentImage>
+        </Rule>
+        <Rule name="technique_id=T1204.002,technique_name=Malicious File" groupRelation="and">
+          <Image condition="end with">\cmd.exe</Image>
+          <Image condition="end with">\powershell.exe</Image>
+          <Image condition="end with">\pwsh.exe</Image>
+          <Image condition="end with">\wscript.exe</Image>
+          <Image condition="end with">\cscript.exe</Image>
+          <Image condition="end with">\mshta.exe</Image>
+          <Image condition="end with">\rundll32.exe</Image>
+          <Image condition="end with">\regsvr32.exe</Image>
+          <Image condition="end with">\certutil.exe</Image>
+          <Image condition="end with">\bitsadmin.exe</Image>
+          <Image condition="end with">\msbuild.exe</Image>
+          <Image condition="end with">\installutil.exe</Image>
+          <Image condition="end with">\wmic.exe</Image>
+          <ParentImage condition="contains">\AppData\Local\Temp\</ParentImage>
+          <ParentImage condition="contains">\Users\Public\</ParentImage>
+          <ParentImage condition="contains">$Recycle.Bin</ParentImage>
+          <ParentImage condition="contains">\Windows\Temp\</ParentImage>
+          <ParentImage condition="contains">\Downloads\</ParentImage>
+        </Rule>
+        <Image name="technique_id=T1036.005,technique_name=Match Legitimate Name or Location" condition="contains">\AppData\Local\Temp\</Image>
+        <Image name="technique_id=T1036.005,technique_name=Match Legitimate Name or Location" condition="contains">\Users\Public\</Image>
+        <Image name="technique_id=T1036.005,technique_name=Match Legitimate Name or Location" condition="contains">$Recycle.Bin</Image>
+        <Image name="technique_id=T1036.005,technique_name=Match Legitimate Name or Location" condition="contains">\Windows\Temp\</Image>
+        <Image name="technique_id=T1036.005,technique_name=Match Legitimate Name or Location" condition="contains">\Downloads\</Image>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains">-EncodedCommand</CommandLine>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains"> -enc </CommandLine>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains">FromBase64String</CommandLine>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains">DownloadString</CommandLine>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains">DownloadFile</CommandLine>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains">Net.WebClient</CommandLine>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains">Invoke-Expression</CommandLine>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains">-WindowStyle Hidden</CommandLine>
+        <CommandLine name="technique_id=T1059.001,technique_name=PowerShell" condition="contains"> -w hidden</CommandLine>
+        <CommandLine name="technique_id=T1195.002,technique_name=Compromise Software Supply Chain" condition="contains">global['!']</CommandLine>
+        <CommandLine name="technique_id=T1195.002,technique_name=Compromise Software Supply Chain" condition="contains">global["!"]</CommandLine>
+        <CommandLine name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">Set-MpPreference</CommandLine>
+        <CommandLine name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">Add-MpPreference</CommandLine>
+        <CommandLine name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">DisableRealtimeMonitoring</CommandLine>
+        <CommandLine name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">ExclusionPath</CommandLine>
+        <CommandLine name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">ExclusionProcess</CommandLine>
+        <Rule name="technique_id=T1053.005,technique_name=Scheduled Task" groupRelation="and">
+            <Image condition="end with">\schtasks.exe</Image>
+            <CommandLine condition="contains">/create</CommandLine>
+            <CommandLine condition="contains">/change</CommandLine>
+        </Rule>
+        <Rule name="technique_id=T1543.003,technique_name=Windows Service" groupRelation="and">
+            <Image condition="end with">\sc.exe</Image>
+            <CommandLine condition="contains"> create</CommandLine>
+            <CommandLine condition="contains"> config</CommandLine>
+        </Rule>
+        <Rule name="technique_id=T1090.001,technique_name=Internal Proxy" groupRelation="and">
+            <Image condition="end with">\netsh.exe</Image>
+            <CommandLine condition="contains">portproxy</CommandLine>
+            <CommandLine condition="contains">advfirewall</CommandLine>
+            <CommandLine condition="contains">firewall add</CommandLine>
+        </Rule>
+        <Rule name="technique_id=T1070.001,technique_name=Clear Windows Event Logs" groupRelation="and">
+            <Image condition="end with">\wevtutil.exe</Image>
+            <CommandLine condition="contains"> cl </CommandLine>
+            <CommandLine condition="contains">clear-log</CommandLine>
+        </Rule>
+        <Rule name="technique_id=T1490,technique_name=Inhibit System Recovery" groupRelation="and">
+            <Image condition="end with">\vssadmin.exe</Image>
+            <Image condition="end with">\bcdedit.exe</Image>
+            <Image condition="end with">\wbadmin.exe</Image>
+            <CommandLine condition="contains">delete</CommandLine>
+            <CommandLine condition="contains">recoveryenabled</CommandLine>
+            <CommandLine condition="contains">shadows</CommandLine>
+        </Rule>
+      </ProcessCreate>
+    </RuleGroup>
+    <RuleGroup name="NetworkConnect-include" groupRelation="or">
+      <NetworkConnect onmatch="include">
+        <Rule name="technique_id=T1071,technique_name=Application Layer Protocol" groupRelation="and">
+            <Initiated condition="is">true</Initiated>
+          <Image condition="contains">\AppData\</Image>
+          <Image condition="contains">\Users\Public\</Image>
+          <Image condition="contains">\ProgramData\</Image>
+          <Image condition="contains">\Temp\</Image>
+          <Image condition="contains">$Recycle.Bin</Image>
+          <Image condition="contains">\Downloads\</Image>
+        </Rule>
+        <Rule name="technique_id=T1218,technique_name=System Binary Proxy Execution" groupRelation="and">
+            <Initiated condition="is">true</Initiated>
+          <Image condition="end with">\powershell.exe</Image>
+          <Image condition="end with">\pwsh.exe</Image>
+          <Image condition="end with">\mshta.exe</Image>
+          <Image condition="end with">\rundll32.exe</Image>
+          <Image condition="end with">\regsvr32.exe</Image>
+          <Image condition="end with">\certutil.exe</Image>
+          <Image condition="end with">\bitsadmin.exe</Image>
+          <Image condition="end with">\wscript.exe</Image>
+          <Image condition="end with">\cscript.exe</Image>
+          <Image condition="end with">\msbuild.exe</Image>
+          <Image condition="end with">\installutil.exe</Image>
+        </Rule>
+      </NetworkConnect>
+    </RuleGroup>
+    <RuleGroup name="NetworkConnect-exclude" groupRelation="or">
+      <NetworkConnect onmatch="exclude">
+        <Image name="technique_id=T1071.001,technique_name=Web Protocols" condition="end with">\chrome.exe</Image>
+        <Image name="technique_id=T1071.001,technique_name=Web Protocols" condition="end with">\msedge.exe</Image>
+        <Image name="technique_id=T1071.001,technique_name=Web Protocols" condition="end with">\firefox.exe</Image>
+        <Image name="technique_id=T1071.001,technique_name=Web Protocols" condition="end with">\msedgewebview2.exe</Image>
+        <Image name="technique_id=T1071.001,technique_name=Web Protocols" condition="end with">\brave.exe</Image>
+        <Image name="technique_id=T1071.001,technique_name=Web Protocols" condition="contains">\AppData\Local\Microsoft\</Image>
+      </NetworkConnect>
+    </RuleGroup>
+    <RuleGroup name="CreateRemoteThread-exclude" groupRelation="or">
+      <CreateRemoteThread onmatch="exclude">
+        <SourceImage name="technique_id=T1055,technique_name=Process Injection" condition="is">C:\Windows\System32\csrss.exe</SourceImage>
+        <SourceImage name="technique_id=T1055,technique_name=Process Injection" condition="is">C:\Windows\System32\wininit.exe</SourceImage>
+        <SourceImage name="technique_id=T1055,technique_name=Process Injection" condition="is">C:\Windows\System32\winlogon.exe</SourceImage>
+        <SourceImage name="technique_id=T1055,technique_name=Process Injection" condition="is">C:\Windows\System32\services.exe</SourceImage>
+        <SourceImage name="technique_id=T1055,technique_name=Process Injection" condition="is">C:\Windows\System32\svchost.exe</SourceImage>
+        <SourceImage name="technique_id=T1055,technique_name=Process Injection" condition="is">C:\Windows\System32\WerFault.exe</SourceImage>
+      </CreateRemoteThread>
+    </RuleGroup>
+    <RuleGroup name="ProcessAccess-include" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <TargetImage name="technique_id=T1003.001,technique_name=LSASS Memory" condition="end with">\lsass.exe</TargetImage>
+      </ProcessAccess>
+    </RuleGroup>
+    <RuleGroup name="ProcessAccess-exclude" groupRelation="or">
+      <ProcessAccess onmatch="exclude">
+        <SourceImage name="technique_id=T1003.001,technique_name=LSASS Memory" condition="begin with">C:\Windows\System32\</SourceImage>
+        <SourceImage name="technique_id=T1003.001,technique_name=LSASS Memory" condition="begin with">C:\Windows\SysWOW64\</SourceImage>
+        <SourceImage name="technique_id=T1003.001,technique_name=LSASS Memory" condition="begin with">C:\Program Files\Windows Defender\</SourceImage>
+        <SourceImage name="technique_id=T1003.001,technique_name=LSASS Memory" condition="begin with">C:\ProgramData\Microsoft\Windows Defender\</SourceImage>
+      </ProcessAccess>
+    </RuleGroup>
+    <RuleGroup name="FileCreate-include" groupRelation="or">
+      <FileCreate onmatch="include">
+        <TargetFilename name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+        <TargetFilename name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">\Windows\System32\Tasks\</TargetFilename>
+        <TargetFilename name="technique_id=T1547.001,technique_name=Registry Run Keys / Startup Folder" condition="contains">\Windows\Tasks\</TargetFilename>
+        <TargetFilename name="technique_id=T1195.001,technique_name=Compromise Software Dependencies and Development Tools" condition="end with">\.vscode\tasks.json</TargetFilename>
+        <TargetFilename name="technique_id=T1546.013,technique_name=PowerShell Profile" condition="end with">\WindowsPowerShell\profile.ps1</TargetFilename>
+        <TargetFilename name="technique_id=T1546.013,technique_name=PowerShell Profile" condition="end with">\Microsoft.PowerShell_profile.ps1</TargetFilename>
+        <TargetFilename name="technique_id=T1554,technique_name=Compromise Host Software Binary" condition="end with">\discord_desktop_core\index.js</TargetFilename>
+        <Rule name="technique_id=T1105,technique_name=Ingress Tool Transfer" groupRelation="and">
+            <TargetFilename condition="contains">\Users\Public\</TargetFilename>
+            <TargetFilename condition="contains">$Recycle.Bin</TargetFilename>
+            <TargetFilename condition="contains">\Windows\Temp\</TargetFilename>
+            <TargetFilename condition="end with">.exe</TargetFilename>
+            <TargetFilename condition="end with">.dll</TargetFilename>
+            <TargetFilename condition="end with">.scr</TargetFilename>
+            <TargetFilename condition="end with">.js</TargetFilename>
+            <TargetFilename condition="end with">.vbs</TargetFilename>
+            <TargetFilename condition="end with">.ps1</TargetFilename>
+            <TargetFilename condition="end with">.bat</TargetFilename>
+            <TargetFilename condition="end with">.hta</TargetFilename>
+            <TargetFilename condition="end with">.lnk</TargetFilename>
+        </Rule>
+      </FileCreate>
+    </RuleGroup>
+    <RuleGroup name="RegistryEvent-include" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys" condition="contains">\CurrentVersion\Run</TargetObject>
+        <TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys" condition="contains">\CurrentVersion\RunOnce</TargetObject>
+        <TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys" condition="contains">\CurrentVersion\RunServices</TargetObject>
+        <TargetObject name="technique_id=T1547.001,technique_name=Registry Run Keys" condition="contains">\Policies\Explorer\Run</TargetObject>
+        <TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper DLL" condition="contains">\Winlogon\Shell</TargetObject>
+        <TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper DLL" condition="contains">\Winlogon\Userinit</TargetObject>
+        <TargetObject name="technique_id=T1547.004,technique_name=Winlogon Helper DLL" condition="contains">\Winlogon\Notify</TargetObject>
+        <TargetObject name="technique_id=T1546.012,technique_name=Image File Execution Options Injection" condition="contains">\Image File Execution Options\</TargetObject>
+        <TargetObject name="technique_id=T1546.010,technique_name=AppInit DLLs" condition="contains">\CurrentVersion\Windows\AppInit_DLLs</TargetObject>
+        <TargetObject name="technique_id=T1090.001,technique_name=Internal Proxy" condition="contains">\Services\PortProxy\</TargetObject>
+        <TargetObject name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">\Windows Defender\Exclusions</TargetObject>
+        <TargetObject name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">\Policies\Microsoft\Windows Defender</TargetObject>
+        <TargetObject name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">DisableAntiSpyware</TargetObject>
+        <TargetObject name="technique_id=T1562.001,technique_name=Disable or Modify Tools" condition="contains">DisableRealtimeMonitoring</TargetObject>
+        <TargetObject name="technique_id=T1562.004,technique_name=Disable or Modify System Firewall" condition="contains">\SharedAccess\Parameters\FirewallPolicy\</TargetObject>
+        <TargetObject name="technique_id=T1546.008,technique_name=Accessibility Features" condition="contains">\Command Processor\AutoRun</TargetObject>
+        <TargetObject name="technique_id=T1037.001,technique_name=Logon Script" condition="contains">\Environment\UserInitMprLogonScript</TargetObject>
+        <TargetObject name="technique_id=T1548.002,technique_name=Bypass User Account Control" condition="contains">\Classes\ms-settings\shell\open\command</TargetObject>
+        <TargetObject name="technique_id=T1547,technique_name=Boot or Logon Autostart Execution" condition="contains">\Session Manager\BootExecute</TargetObject>
+        <TargetObject name="technique_id=T1543.003,technique_name=Windows Service" condition="end with">\ImagePath</TargetObject>
+      </RegistryEvent>
+    </RuleGroup>
+    <RuleGroup name="DnsQuery-include" groupRelation="or">
+      <DnsQuery onmatch="include">
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="contains">\AppData\</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="contains">\Users\Public\</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="contains">\ProgramData\</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="contains">\Temp\</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="contains">$Recycle.Bin</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="contains">\Downloads\</Image>
+        <QueryName name="technique_id=T1568,technique_name=Dynamic Resolution" condition="end with">.duckdns.org</QueryName>
+        <QueryName name="technique_id=T1568,technique_name=Dynamic Resolution" condition="end with">.ngrok.io</QueryName>
+        <QueryName name="technique_id=T1568,technique_name=Dynamic Resolution" condition="end with">.ngrok-free.app</QueryName>
+        <QueryName name="technique_id=T1568,technique_name=Dynamic Resolution" condition="end with">.trycloudflare.com</QueryName>
+        <QueryName name="technique_id=T1568,technique_name=Dynamic Resolution" condition="end with">.serveo.net</QueryName>
+        <QueryName name="technique_id=T1568,technique_name=Dynamic Resolution" condition="end with">.no-ip.org</QueryName>
+        <QueryName name="technique_id=T1568,technique_name=Dynamic Resolution" condition="end with">.hopto.org</QueryName>
+        <QueryName name="technique_id=T1568,technique_name=Dynamic Resolution" condition="end with">.ddns.net</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+    <RuleGroup name="DnsQuery-exclude" groupRelation="or">
+      <DnsQuery onmatch="exclude">
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="end with">\chrome.exe</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="end with">\msedge.exe</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="end with">\firefox.exe</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="end with">\msedgewebview2.exe</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="end with">\brave.exe</Image>
+        <Image name="technique_id=T1071.004,technique_name=DNS" condition="contains">\AppData\Local\Microsoft\</Image>
+      </DnsQuery>
+    </RuleGroup>
+    <RuleGroup name="ImageLoad-include" groupRelation="or">
+      <ImageLoad onmatch="include">
+        <Rule name="technique_id=T1574.002,technique_name=DLL Side-Loading" groupRelation="and">
+          <Signed condition="is">false</Signed>
+          <ImageLoaded condition="contains">\AppData\</ImageLoaded>
+          <ImageLoaded condition="contains">\Users\Public\</ImageLoaded>
+          <ImageLoaded condition="contains">\ProgramData\</ImageLoaded>
+          <ImageLoaded condition="contains">\Temp\</ImageLoaded>
+          <ImageLoaded condition="contains">$Recycle.Bin</ImageLoaded>
+          <ImageLoaded condition="contains">\Downloads\</ImageLoaded>
+        </Rule>
+      </ImageLoad>
+    </RuleGroup>
+    <RuleGroup name="ImageLoad-exclude" groupRelation="or">
+      <ImageLoad onmatch="exclude">
+        <ImageLoaded name="technique_id=T1574.002,technique_name=DLL Side-Loading" condition="contains">\AppData\Local\Microsoft\</ImageLoaded>
+      </ImageLoad>
+    </RuleGroup>
+    <RuleGroup name="ProcessTampering-exclude" groupRelation="or">
+      <ProcessTampering onmatch="exclude" />
+    </RuleGroup>
+    <RuleGroup name="WmiEvent-include" groupRelation="or">
+      <WmiEvent onmatch="include">
+        <Operation name="technique_id=T1546.003,technique_name=WMI Event Subscription" condition="is">Created</Operation>
+      </WmiEvent>
+    </RuleGroup>
+  </EventFiltering>
+</Sysmon>

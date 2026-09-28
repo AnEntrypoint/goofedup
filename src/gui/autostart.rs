@@ -1,6 +1,8 @@
 // Optional launch-at-login via the per-user Run registry key -- no admin
 // rights required, matches how most tray utilities offer autostart.
 
+use super::hardened;
+use crate::win_identity;
 use std::path::PathBuf;
 use windows::core::HSTRING;
 use windows::Win32::System::Registry::{
@@ -15,7 +17,7 @@ fn exe_path() -> Option<PathBuf> {
     std::env::current_exe().ok()
 }
 
-pub fn is_enabled() -> bool {
+fn run_key_present() -> bool {
     unsafe {
         let mut hkey = HKEY::default();
         if RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(RUN_KEY), 0, KEY_QUERY_VALUE, &mut hkey).is_err() {
@@ -27,7 +29,7 @@ pub fn is_enabled() -> bool {
     }
 }
 
-pub fn enable() -> bool {
+fn set_run_key() -> bool {
     let Some(exe) = exe_path() else { return false };
     let exe_str = exe.display().to_string();
     unsafe {
@@ -49,7 +51,7 @@ pub fn enable() -> bool {
     }
 }
 
-pub fn disable() -> bool {
+pub fn remove_run_key() -> bool {
     unsafe {
         let mut hkey = HKEY::default();
         if RegOpenKeyExW(HKEY_CURRENT_USER, &HSTRING::from(RUN_KEY), 0, KEY_WRITE, &mut hkey).is_err() {
@@ -59,4 +61,25 @@ pub fn disable() -> bool {
         let _ = RegCloseKey(hkey);
         ok
     }
+}
+
+pub fn is_enabled() -> bool {
+    run_key_present() || (hardened::task_exists(hardened::DEFAULT_TASK_NAME) && hardened::task_enabled(hardened::DEFAULT_TASK_NAME))
+}
+
+pub fn enable() -> bool {
+    if hardened::task_exists(hardened::DEFAULT_TASK_NAME) {
+        return hardened::set_task_enabled(hardened::DEFAULT_TASK_NAME, true);
+    }
+    if win_identity::is_elevated() {
+        return hardened::install_default();
+    }
+    set_run_key()
+}
+
+pub fn disable() -> bool {
+    let task_disabled = !hardened::task_exists(hardened::DEFAULT_TASK_NAME)
+        || hardened::set_task_enabled(hardened::DEFAULT_TASK_NAME, false);
+    let run_key_cleared = !run_key_present() || remove_run_key();
+    task_disabled && run_key_cleared
 }

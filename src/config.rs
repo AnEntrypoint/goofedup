@@ -202,6 +202,7 @@ pub struct Config {
     /// not because any real legitimate or malicious sample observed so far
     /// has needed more than a couple of layers.
     pub c2_max_decode_depth: u32,
+    pub known_benign_event_sources: Vec<String>,
 }
 
 pub struct BootstrapEntry {
@@ -251,6 +252,7 @@ pub struct ConfigOverrides {
     pub read_burst_baseline_warm_up_floor_bytes: Option<f64>,
     pub read_burst_ema_alpha: Option<f64>,
     pub c2_max_decode_depth: Option<u32>,
+    pub known_benign_event_sources: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -346,6 +348,9 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     }
     if let Some(v) = o.c2_max_decode_depth {
         base.c2_max_decode_depth = v;
+    }
+    if let Some(v) = &o.known_benign_event_sources {
+        base.known_benign_event_sources = v.clone();
     }
     base
 }
@@ -576,6 +581,14 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
             rows: vec![ConfigRow {
                 label: "Max decode depth".to_string(),
                 value: marked(cfg.c2_max_decode_depth.to_string(), overrides.c2_max_decode_depth.is_some()),
+            }],
+        },
+        ConfigSection {
+            title: "Known Benign Event Sources",
+            description: "Executable names whose Windows event-log findings (CreateRemoteThread, process lineage, lsass access, tampering) are downgraded to Info with a note -- still recorded, never suppressed.",
+            rows: vec![ConfigRow {
+                label: "Source names".to_string(),
+                value: marked(cfg.known_benign_event_sources.join(", "), overrides.known_benign_event_sources.is_some()),
             }],
         },
     ]
@@ -895,6 +908,7 @@ impl Config {
             read_burst_baseline_warm_up_floor_bytes: 512.0 * 1024.0,
             read_burst_ema_alpha: 0.2,
             c2_max_decode_depth: 4,
+            known_benign_event_sources: vec!["agentplug-runner.exe".to_string()],
         }
     }
 }

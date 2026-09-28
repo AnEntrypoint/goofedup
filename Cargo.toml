@@ -57,6 +57,10 @@ windows = { version = "0.58", features = [
   "Win32_Storage_EnhancedStorage",
   "Data_Xml_Dom",
   "UI_Notifications",
+  "Win32_System_EventLog",
+  "Win32_Security_Authorization",
+  "Win32_System_Console",
+  "Win32_Storage_FileSystem",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -22,6 +22,9 @@ pub fn load_overrides_from_file(path: &Path) -> Result<Option<ConfigOverrides>, 
     if !path.exists() {
         return Ok(None);
     }
+    if let Some(reason) = crate::self_protect::untrusted_override_reason(path) {
+        return Err(reason);
+    }
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let overrides: ConfigOverrides = serde_json::from_str(&text).map_err(|e| e.to_string())?;
     Ok(Some(overrides))
