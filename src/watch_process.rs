@@ -9,6 +9,7 @@
 use crate::alert::AlertSink;
 use crate::config::{Config, SharedConfig};
 use crate::heuristics::{decode_encoded_command, is_denied_exec_path, is_unlisted_exec_path, score_command_line, score_process_name};
+use crate::process_trust::{self, ProcessTrust};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -93,6 +94,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
 
     let mut read_trackers: HashMap<Pid, ReadTracker> = HashMap::new();
     let mut warned_unlisted_paths: HashSet<String> = HashSet::new();
+    let mut trust_watch = ProcessTrust::new();
 
     // A fresh System::new_all() is built EVERY poll cycle rather than reused
     // via refresh_processes on one long-lived instance -- a real bug hit and
@@ -128,6 +130,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
                 inspect_new_process(&cfg, &alerts, &sys, p, &mut warned_unlisted_paths);
             }
         }
+        trust_watch.observe(&cfg, &alerts, &sys, &known, &current);
 
         // Runs against EVERY currently-running process, not just newly
         // spawned ones -- a mass-scanning process may already have been
@@ -432,7 +435,7 @@ fn inspect_new_process(
                 format!("'{name}' (PID {pid}) is executing from a location nothing legitimate runs from"),
                 format!("exe={exe_path} ({reason})"),
             );
-        } else if is_unlisted_exec_path(&exe_path, &cfg.allowed_exec_roots) {
+        } else if !process_trust::supersedes_path_allowlist(cfg) && is_unlisted_exec_path(&exe_path, &cfg.allowed_exec_roots) {
             // The allowlist check itself stays exactly as sensitive as
             // before -- a system-wide install location or a user's own
             // tooling directory can still hold a compromised binary, so

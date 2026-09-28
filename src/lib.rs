@@ -7,8 +7,12 @@ pub mod electron_sweep;
 #[cfg(feature = "gui")]
 pub mod gui;
 pub mod heuristics;
+pub mod image_integrity;
+pub mod lineage;
+pub mod process_trust;
 pub mod scan_js;
 pub mod tamper_config;
+pub mod trust;
 pub mod watch_file;
 pub mod watch_network;
 pub mod watch_persistence;
