@@ -202,6 +202,7 @@ pub struct Config {
     /// not because any real legitimate or malicious sample observed so far
     /// has needed more than a couple of layers.
     pub c2_max_decode_depth: u32,
+    pub tamper: crate::tamper_config::TamperConfig,
 }
 
 pub struct BootstrapEntry {
@@ -251,6 +252,7 @@ pub struct ConfigOverrides {
     pub read_burst_baseline_warm_up_floor_bytes: Option<f64>,
     pub read_burst_ema_alpha: Option<f64>,
     pub c2_max_decode_depth: Option<u32>,
+    pub tamper: crate::tamper_config::TamperOverrides,
 }
 
 #[derive(Deserialize)]
@@ -347,6 +349,7 @@ pub fn apply_overrides(mut base: Config, o: &ConfigOverrides) -> Config {
     if let Some(v) = o.c2_max_decode_depth {
         base.c2_max_decode_depth = v;
     }
+    base.tamper = base.tamper.with_overrides(&o.tamper);
     base
 }
 
@@ -404,7 +407,7 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
         }
     }
 
-    vec![
+    let mut sections = vec![
         ConfigSection {
             title: "General",
             description: "Basic runtime info: where logs are written and how often the background watchers poll.",
@@ -578,7 +581,9 @@ pub fn config_sections(cfg: &Config, overrides: &ConfigOverrides) -> Vec<ConfigS
                 value: marked(cfg.c2_max_decode_depth.to_string(), overrides.c2_max_decode_depth.is_some()),
             }],
         },
-    ]
+    ];
+    sections.push(cfg.tamper.section(&overrides.tamper));
+    sections
 }
 
 fn format_bytes(b: u64) -> String {
@@ -895,6 +900,7 @@ impl Config {
             read_burst_baseline_warm_up_floor_bytes: 512.0 * 1024.0,
             read_burst_ema_alpha: 0.2,
             c2_max_decode_depth: 4,
+            tamper: crate::tamper_config::TamperConfig::default(),
         }
     }
 }
