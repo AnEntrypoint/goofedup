@@ -1,7 +1,7 @@
 use clap::Parser;
 use goofedup::alert::AlertSink;
 use goofedup::config::{dirs_home, override_path, Config, ConfigOverrides, SharedConfig};
-use goofedup::{config_reload, scan_js, watch_file, watch_network, watch_persistence, watch_process};
+use goofedup::{audit_win, config_reload, scan_js, watch_file, watch_network, watch_persistence, watch_process, watch_tamper};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -34,6 +34,19 @@ struct Args {
     /// if anything was flagged, so it composes with CI/pre-commit tooling.
     #[arg(long, value_name = "PATH")]
     scan_deps: Option<PathBuf>,
+
+    /// One-shot Windows posture audit: portproxy rules, exposed debugger/admin
+    /// listeners, inbound firewall allows, SYSTEM tasks and services with
+    /// missing or non-admin-writable binaries, Defender state, root certs, hosts
+    /// file, local admins, plaintext credential files and autoruns. Exits
+    /// non-zero if any Critical finding exists.
+    #[arg(long)]
+    audit: bool,
+
+    /// With --audit: list every finding including Info and lift the per-category
+    /// line cap.
+    #[arg(long, requires = "audit")]
+    audit_all: bool,
 }
 
 fn main() {
@@ -44,6 +57,10 @@ fn main() {
     if args.show_config {
         print_config(&initial_cfg, &initial_overrides);
         return;
+    }
+
+    if args.audit {
+        std::process::exit(audit_win::run_cli(&initial_cfg.tamper, args.audit_all));
     }
 
     if let Some(root) = &args.scan_deps {
@@ -130,6 +147,14 @@ fn main() {
         let running = running.clone();
         handles.push(std::thread::spawn(move || {
             watch_network::run_firewall_drift(cfg, alerts, running)
+        }));
+    }
+    {
+        let cfg = cfg.clone();
+        let alerts = alerts.clone();
+        let running = running.clone();
+        handles.push(std::thread::spawn(move || {
+            watch_tamper::run(cfg, alerts, running)
         }));
     }
     {
