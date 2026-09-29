@@ -26,6 +26,8 @@ const DEFAULT_ELECTRON_SWEEP_INTERVAL_SECS: u64 = 60 * 60;
 
 #[cfg(target_os = "windows")]
 const DISCORD_DESKTOP_CORE_INDEX_JS_MAX_BYTES: u64 = 2048;
+const NPM_LIB_CLI_JS_MAX_BYTES: u64 = 2048;
+const NPM_LIB_CLI_JS_PATH_FRAGMENT: &str = "npm\\lib";
 #[cfg(target_os = "windows")]
 const DEV_TOOL_HOME_DIRS_UNDER_USER_HOME: [&str; 6] =
     [".cargo", ".rustup", "scoop", ".local", ".gm-tools", ".kimi-code"];
@@ -598,6 +600,24 @@ impl Config {
                 allowed_exec_roots.push(local.clone());
                 allowed_exec_roots.push(local.join("Microsoft"));
                 electron_sweep_roots.push(local.join("Programs"));
+            }
+            let mut npm_install_roots = Vec::new();
+            if let Ok(pf) = std::env::var("ProgramFiles") {
+                npm_install_roots.push(PathBuf::from(pf).join("nodejs").join("node_modules").join("npm"));
+            }
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                npm_install_roots.push(PathBuf::from(appdata).join("npm").join("node_modules").join("npm"));
+            }
+            if let Ok(program_data) = std::env::var("ProgramData") {
+                npm_install_roots.push(PathBuf::from(program_data).join("nvm"));
+            }
+            for root in npm_install_roots {
+                bootstrap_watch.push(BootstrapEntry {
+                    search_root: root,
+                    file_name: "cli.js".to_string(),
+                    path_must_contain: NPM_LIB_CLI_JS_PATH_FRAGMENT.to_string(),
+                    max_bytes: NPM_LIB_CLI_JS_MAX_BYTES,
+                });
             }
             if let Ok(appdata) = std::env::var("APPDATA") {
                 let appdata = PathBuf::from(appdata);
