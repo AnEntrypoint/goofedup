@@ -76,6 +76,9 @@ const BROWSER_AND_ELECTRON_APP_NAMES: [&str; 7] = [
 const AGENTPLUG_RUNNER_NAMES: [&str; 2] = ["agentplug-runner.exe", "agentplug-runner"];
 const CODEBASE_SEARCH_TOOL_NAMES: [&str; 2] = ["grep.exe", "grep"];
 const CLAUDE_CLI_NAMES: [&str; 2] = ["claude.exe", "claude"];
+const SECURITY_INDEXER_AND_MEDIA_TOOL_NAMES: [&str; 6] =
+    ["msmpeng.exe", "everything.exe", "ffmpeg.exe", "ffprobe.exe", "goofedup.exe", "goofedup"];
+const GIT_FOR_WINDOWS_REMOTE_THREAD_HELPER_NAMES: [&str; 2] = ["getprocaddr32.exe", "getprocaddr64.exe"];
 
 const AUTOMATION_HARNESS_SHELL_ANCESTOR_NAMES: [&str; 3] = ["bash.exe", "cmd.exe", "claude.exe"];
 
@@ -709,6 +712,7 @@ impl Config {
                 &AGENTPLUG_RUNNER_NAMES[..],
                 &CODEBASE_SEARCH_TOOL_NAMES[..],
                 &CLAUDE_CLI_NAMES[..],
+                &SECURITY_INDEXER_AND_MEDIA_TOOL_NAMES[..],
             ]
             .iter()
             .flat_map(|group| owned_strings(group))
@@ -737,7 +741,10 @@ impl Config {
             trusted_publishers: crate::trust::default_trusted_publishers(),
             unsigned_user_writable_policy: UnsignedUserWritablePolicy::default(),
             repo_watch_roots: default_repo_watch_roots(&home),
-            known_benign_event_sources: vec!["agentplug-runner.exe".to_string()],
+            known_benign_event_sources: [&AGENTPLUG_RUNNER_NAMES[..1], &GIT_FOR_WINDOWS_REMOTE_THREAD_HELPER_NAMES[..]]
+                .iter()
+                .flat_map(|group| owned_strings(group))
+                .collect(),
         }
     }
 }

@@ -515,17 +515,26 @@ pub fn is_unlisted_exec_path(exe_path: &str, allowed_roots: &[std::path::PathBuf
 }
 
 pub fn is_compiler_build_artifact_path(exe_lower: &str) -> bool {
-    let target_marker = if exe_lower.contains('\\') { "\\target\\" } else { "/target/" };
-    let Some(after_target) = exe_lower.split(target_marker).nth(1) else {
-        return false;
-    };
     let sep = if exe_lower.contains('\\') { '\\' } else { '/' };
-    let mut segments = after_target.split(sep);
-    let Some(profile) = segments.next() else { return false };
-    if !matches!(profile, "debug" | "release") {
-        return false;
-    }
-    matches!(segments.next(), Some("build" | "deps"))
+    let segments: Vec<&str> = exe_lower.split(sep).collect();
+    segments.windows(4).any(|w| {
+        matches!(w[1], "debug" | "release")
+            && matches!(w[2], "build" | "deps")
+            && (w[0] == "target" || w[0].ends_with("-target") || w[0].ends_with("_target"))
+    })
+}
+
+pub fn is_dev_toolchain_path(exe_lower: &str) -> bool {
+    let normalized = exe_lower.replace('/', "\\");
+    const TOOLCHAIN_FRAGMENTS: [&str; 5] = [
+        "\\.cargo\\bin\\",
+        "\\.rustup\\toolchains\\",
+        "\\scoop\\apps\\",
+        "\\programdata\\chocolatey\\",
+        "\\node_modules\\@esbuild\\",
+    ];
+    let is_python_console_script = normalized.contains("\\python3") && normalized.contains("\\scripts\\");
+    is_python_console_script || TOOLCHAIN_FRAGMENTS.iter().any(|f| normalized.contains(f))
 }
 
 const KNOWN_NAME_HOMES: &[(&str, &[&str])] = &[

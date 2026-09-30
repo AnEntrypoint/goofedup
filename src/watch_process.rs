@@ -166,7 +166,9 @@ fn check_read_burst(
             let root_str = root.to_string_lossy().to_lowercase();
             !root_str.is_empty() && exe_path_lower.starts_with(&root_str)
         });
-    let gets_high_throughput_relaxation = is_known_high_throughput_tool || runs_from_os_vendor_root;
+    let is_locally_built_binary = !exe_path_lower.is_empty()
+        && crate::process_trust::is_local_cargo_artifact(&p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default());
+    let gets_high_throughput_relaxation = is_known_high_throughput_tool || runs_from_os_vendor_root || is_locally_built_binary;
     let effective_absolute_threshold = if gets_high_throughput_relaxation {
         ((cfg.file_read_burst_absolute_bytes_per_poll as f64 * cfg.known_high_throughput_tool_multiplier) as u64)
             .min(cfg.file_read_burst_uncorroborated_ceiling_bytes)
@@ -181,7 +183,7 @@ fn check_read_burst(
 
     let exe_path_raw = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let path_is_corroborating = is_denied_exec_path(&exe_path_raw, &cfg.deny_exec_path_fragments).is_some()
-        || is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots);
+        || (!is_locally_built_binary && is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots));
     let effective_absolute_threshold = if path_is_corroborating {
         ((effective_absolute_threshold as f64) * cfg.read_burst_corroborated_threshold_fraction) as u64
     } else {

@@ -13,6 +13,11 @@ pub struct ImageWatch {
     reported: HashSet<(Pid, u64)>,
 }
 
+fn is_updater_rename(original_path: &str, moved_path: &str) -> bool {
+    let moved_name = moved_path.rsplit(['\\', '/']).next().unwrap_or("").to_lowercase();
+    (moved_name.contains(".old") || moved_name.starts_with("old_")) && std::path::Path::new(original_path).is_file()
+}
+
 fn format_time(t: SystemTime) -> String {
     chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string()
 }
@@ -78,11 +83,12 @@ impl ImageWatch {
 
             if let Some(reason) = reason {
                 self.reported.insert(identity);
-                alerts.critical(
-                    "image-replaced-after-start",
-                    format!("'{name}' (PID {}) is running code that no longer matches its image on disk", pid.as_u32()),
-                    format!("exe={exe_display} {reason}"),
-                );
+                let message = format!("'{name}' (PID {}) is running code that no longer matches its image on disk", pid.as_u32());
+                let evidence = format!("exe={exe_display} {reason}");
+                match baseline.as_ref().filter(|(_, seen_path, _)| is_updater_rename(seen_path, &exe_display)) {
+                    Some(_) => alerts.warn("image-replaced-after-start", format!("{message} (updater-shaped rename: original path repopulated)"), evidence),
+                    None => alerts.critical("image-replaced-after-start", message, evidence),
+                }
             }
         }
         self.baselines.retain(|pid, _| sys.process(*pid).is_some());

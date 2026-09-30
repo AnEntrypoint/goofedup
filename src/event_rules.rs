@@ -1,8 +1,8 @@
 use crate::alert::Level;
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 pub const CH_SECURITY: &str = "Security";
 pub const CH_SYSTEM: &str = "System";
@@ -12,6 +12,7 @@ pub const CH_FIREWALL: &str = "Microsoft-Windows-Windows Firewall With Advanced 
 pub const CH_TASKS: &str = "Microsoft-Windows-TaskScheduler/Operational";
 
 const DEFENDER_SETTING_CHANGED: &str = "Defender protection setting changed";
+const DEFENDER_CLOUD_FAILURE_TIMESTAMP_VALUE: &str = "\\spynet\\lastmapsfailuretimestring";
 
 pub struct ChannelSpec {
     pub channel: &'static str,
@@ -440,6 +441,9 @@ fn defender_config_change(ev: &EventRecord) -> Option<Finding> {
     if turned_off {
         return finding(Level::Critical, "defender-tamper", "Defender protection setting turned off".to_string(), change);
     }
+    if key.contains(DEFENDER_CLOUD_FAILURE_TIMESTAMP_VALUE) || old_key.contains(DEFENDER_CLOUD_FAILURE_TIMESTAMP_VALUE) {
+        return None;
+    }
     let sensitive = [
         "\\real-time protection\\",
         "\\spynet\\",
@@ -580,6 +584,15 @@ fn task_command(content: &str) -> String {
     unescape(format!("{command} {arguments}").trim())
 }
 
+fn first_update_of_task_this_session(task_name: &str) -> bool {
+    static UPDATED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    UPDATED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut seen| seen.insert(task_name.to_lowercase()))
+        .unwrap_or(true)
+}
+
 fn scheduled_task(ev: &EventRecord, ctx: &RuleContext) -> Option<Finding> {
     let name = ev.field("TaskName");
     let verb = match (ev.channel.as_str(), ev.event_id) {
@@ -594,6 +607,9 @@ fn scheduled_task(ev: &EventRecord, ctx: &RuleContext) -> Option<Finding> {
         return None;
     }
     let level = if trust == PathTrust::UserWritable { Level::Critical } else { Level::Warn };
+    if verb == "updated" && level == Level::Warn && !first_update_of_task_this_session(name) {
+        return None;
+    }
     finding(
         level,
         "persistence-event",

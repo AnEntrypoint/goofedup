@@ -1,6 +1,6 @@
 use crate::alert::{AlertSink, Level};
 use crate::config::Config;
-use crate::heuristics::{is_compiler_build_artifact_path, is_denied_exec_path, score_command_line, score_process_name};
+use crate::heuristics::{is_compiler_build_artifact_path, is_dev_toolchain_path, is_denied_exec_path, score_command_line, score_process_name};
 use crate::image_integrity::ImageWatch;
 use crate::lineage::{self, Finding};
 use crate::trust::{self, ImageKey, ImageRecord, Trust, UnsignedMode};
@@ -160,7 +160,7 @@ fn exe_of(p: &Process) -> String {
     p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()
 }
 
-fn is_local_cargo_artifact(exe_path: &str) -> bool {
+pub fn is_local_cargo_artifact(exe_path: &str) -> bool {
     let components: Vec<_> = Path::new(exe_path).components().collect();
     components.iter().enumerate().any(|(i, component)| {
         component.as_os_str().eq_ignore_ascii_case("target")
@@ -368,7 +368,7 @@ impl ProcessTrust {
                     evidence,
                 );
             }
-        } else if self.warned_images.insert(record.key.clone()) {
+        } else if !is_dev_toolchain_path(&job.exe_path) && self.warned_images.insert(record.key.clone()) {
             alerts.warn(
                 "unsigned-in-user-writable",
                 format!(
