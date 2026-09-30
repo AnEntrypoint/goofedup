@@ -84,7 +84,7 @@
 - `lookup()` returns None until a worker finishes; Unknown never alerts. Only Unsigned/Invalid images are hashed. Locally built cargo artifacts (`target/{debug,release}` under a Cargo.toml dir) skip the WARN (spoofable by creating a Cargo.toml; deliberate trade). goofedup's own pid is skipped. Python3xx roots are not admin-only.
 - agentplug-runner.exe is unsigned and self-updating, so its hash pin breaks every update; fix = gm signs the binary and its publisher joins `trusted_publishers`. A parent that started later than the child is pid reuse.
 
-- `is_dev_toolchain_path` (`.cargoin`, `.rustup	oolchains`, scoop apps, chocolatey, `@esbuild`, Python3xx Scripts) skips only the unsigned-in-user-writable WARN; corroborated CRITICALs still fire.
+- `is_dev_toolchain_path` (`.cargo/bin`, `.rustup/toolchains`, scoop apps, chocolatey, `@esbuild`, Python3xx Scripts) skips only the unsigned-in-user-writable WARN; corroborated CRITICALs still fire.
 - `image-replaced-after-start` is WARN (not CRITICAL) when the moved image is `*.old*`/`old_*` and the original path exists again (Chrome `old_chrome.exe`, claude `.old.<ts>` self-updates); a deleted or unexplained move stays CRITICAL.
 - Defender 5007 `SpyNet\LastMAPSFailureTimeString` is telemetry churn (52 WARNs), ignored. Scheduled-task `updated` events (no TaskContent, ASUS task 32x) WARN once per task name per session.
 
