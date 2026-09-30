@@ -46,9 +46,49 @@ struct Snapshot {
     lists: BTreeMap<String, Vec<String>>,
     numbers: BTreeMap<String, f64>,
     log_path: String,
+    #[serde(default)]
+    defaults: Option<Box<Snapshot>>,
 }
 
 fn snapshot(cfg: &Config) -> Snapshot {
+    let mut snap = snapshot_effective(cfg);
+    snap.defaults = Some(Box::new(snapshot_effective(&Config::default_for_platform())));
+    snap
+}
+
+fn rebase_onto_new_defaults(baseline: &Snapshot, current_defaults: &Snapshot) -> Snapshot {
+    let Some(old_defaults) = baseline.defaults.as_deref() else {
+        return baseline.clone();
+    };
+    let mut rebased = baseline.clone();
+    for (name, effective) in &baseline.lists {
+        let old_default: BTreeSet<_> = old_defaults.lists.get(name).into_iter().flatten().collect();
+        let effective_set: BTreeSet<_> = effective.iter().collect();
+        let override_removed: BTreeSet<_> = old_default.difference(&effective_set).collect();
+        let override_added: Vec<String> = effective_set.difference(&old_default).map(|s| s.to_string()).collect();
+        let mut merged: Vec<String> = current_defaults
+            .lists
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|entry| !override_removed.contains(entry))
+            .cloned()
+            .collect();
+        merged.extend(override_added);
+        rebased.lists.insert(name.clone(), merged);
+    }
+    for (name, effective) in &baseline.numbers {
+        let overridden = old_defaults.numbers.get(name).is_some_and(|d| (d - effective).abs() >= f64::EPSILON);
+        if !overridden {
+            if let Some(new_default) = current_defaults.numbers.get(name) {
+                rebased.numbers.insert(name.clone(), *new_default);
+            }
+        }
+    }
+    rebased
+}
+
+fn snapshot_effective(cfg: &Config) -> Snapshot {
     let paths = |v: &[PathBuf]| v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
     let lists = BTreeMap::from([
         ("allowed_exec_roots".to_string(), paths(&cfg.allowed_exec_roots)),
@@ -86,6 +126,7 @@ fn snapshot(cfg: &Config) -> Snapshot {
         lists,
         numbers,
         log_path: cfg.log_path.display().to_string(),
+        defaults: None,
     }
 }
 
@@ -466,8 +507,10 @@ pub fn run(cfg: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>, 
     let (initial_cfg, _) = load_config_with_overrides(&override_file);
     let mut current = snapshot(&initial_cfg);
     match load_baseline(&override_file) {
-        Some(baseline) if baseline.version == current.version => {
-            report_config_change(&alerts, &override_file, &diff_snapshots(&baseline, &current), "changed while goofedup was not running");
+        Some(baseline) if baseline.version == current.version && baseline.defaults.is_some() => {
+            let current_defaults = current.defaults.as_deref().cloned().unwrap_or_default();
+            let comparable = rebase_onto_new_defaults(&baseline, &current_defaults);
+            report_config_change(&alerts, &override_file, &diff_snapshots(&comparable, &current), "changed while goofedup was not running");
         }
         _ => {}
     }

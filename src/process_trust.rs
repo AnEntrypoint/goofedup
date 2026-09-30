@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use sysinfo::{Pid, Process, System};
 
 const DEFERRAL_LIMIT: Duration = Duration::from_secs(30);
+const CARGO_TARGET_DIR_TAG_FILE: &str = "CACHEDIR.TAG";
 
 const MASQUERADE_PRONE_SYSTEM_NAMES: &[&str] = &[
     "svchost", "lsass", "csrss", "services", "winlogon", "wininit", "smss", "explorer", "spoolsv", "dllhost", "rundll32",
@@ -163,12 +164,18 @@ fn exe_of(p: &Process) -> String {
 pub fn is_local_cargo_artifact(exe_path: &str) -> bool {
     let components: Vec<_> = Path::new(exe_path).components().collect();
     components.iter().enumerate().any(|(i, component)| {
-        component.as_os_str().eq_ignore_ascii_case("target")
-            && components[i + 1..]
+        let profile_dir_follows = |window: usize| {
+            components[i + 1..]
                 .iter()
-                .take(2)
+                .take(window)
                 .any(|next| next.as_os_str().eq_ignore_ascii_case("debug") || next.as_os_str().eq_ignore_ascii_case("release"))
-            && components[..i].iter().collect::<std::path::PathBuf>().join("Cargo.toml").is_file()
+        };
+        let parent: std::path::PathBuf = components[..=i].iter().collect();
+        let is_default_target_dir = component.as_os_str().eq_ignore_ascii_case("target")
+            && profile_dir_follows(2)
+            && components[..i].iter().collect::<std::path::PathBuf>().join("Cargo.toml").is_file();
+        let is_custom_target_dir = profile_dir_follows(1) && parent.join(CARGO_TARGET_DIR_TAG_FILE).is_file();
+        is_default_target_dir || is_custom_target_dir
     })
 }
 

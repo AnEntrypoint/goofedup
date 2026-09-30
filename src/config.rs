@@ -644,9 +644,9 @@ impl Config {
                 os_vendor_roots.push(PathBuf::from(windir));
             }
             if let Ok(sysdrive) = std::env::var("SystemDrive") {
-                let sysdrive = PathBuf::from(sysdrive);
+                let sysdrive = sysdrive.trim_end_matches('\\').to_string();
                 for minor in PYTHON_ALL_USERS_INSTALL_MIN_MINOR_VERSION..=PYTHON_ALL_USERS_INSTALL_MAX_MINOR_VERSION {
-                    let root = sysdrive.join(format!("Python3{minor}"));
+                    let root = PathBuf::from(format!("{sysdrive}\\Python3{minor}"));
                     allowed_exec_roots.push(root.clone());
                     os_vendor_roots.push(root);
                 }

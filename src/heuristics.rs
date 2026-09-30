@@ -230,6 +230,7 @@ pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdic
     let mut score = 0u32;
     let mut reasons = Vec::new();
     let mut has_strong_signal = false;
+    let mut has_content_signal = false;
 
     if cmdline.len() > VERY_LONG_CMDLINE_LEN {
         score += 2;
@@ -243,17 +244,20 @@ pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdic
         score += 2;
         reasons.push(format!("embedded IP literal ({})", m.as_str()));
         has_strong_signal = true;
+        has_content_signal = true;
     }
     if url_re().find_iter(scored).any(|m| !url_host_is_non_routable(m.as_str())) {
         score += 1;
         reasons.push("embedded URL literal".to_string());
         has_strong_signal = true;
+        has_content_signal = true;
     }
 
     if let Some(len) = has_long_encoded_blob(scored) {
         score += 2;
         reasons.push(format!("long contiguous encoded-looking blob ({len} chars, base64/hex-alphabet run)"));
         has_strong_signal = true;
+        has_content_signal = true;
     }
 
     let hits: Vec<&str> = OBFUSCATION_MARKERS
@@ -265,6 +269,7 @@ pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdic
         score += 1;
         reasons.push(format!("generic obfuscation/exfil marker(s): {}", hits.join(", ")));
         has_strong_signal = true;
+        has_content_signal = true;
     }
 
     let symbol_count = scored
@@ -290,7 +295,7 @@ pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdic
         reasons.push(format!("elevated content entropy ({entropy:.2} bits/char)"));
     }
 
-    if score >= COMMAND_LINE_ALERT_SCORE {
+    if score >= COMMAND_LINE_ALERT_SCORE && has_content_signal {
         Some(Verdict { score, reasons })
     } else {
         None
@@ -567,7 +572,7 @@ const KNOWN_NAME_HOMES: &[(&str, &[&str])] = &[
     ("node", &["/usr/", "/opt/", "/.nvm/", "/.fnm/", "/.local/"]),
     ("python.exe", &["\\python", "\\program files"]),
     ("chrome.exe", &["\\google\\chrome", "\\program files"]),
-    ("discord.exe", &["\\discord\\app-"]),
+    ("discord.exe", &["\\discord\\app-", "\\appdata\\local\\discord\\discord.exe"]),
     ("launchd", &["/sbin/", "/usr/libexec/"]),
     ("kernel_task", &["/System/"]),
     ("windowserver", &["/system/library/"]),
