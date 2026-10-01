@@ -692,9 +692,10 @@ fn firewall_rule(ev: &EventRecord, ctx: &RuleContext) -> Option<Finding> {
     let all_profiles = matches!(ev.field("Profiles"), "2147483647" | "7");
     let any_port_any_program = matches!(ports, "" | "*") && program.is_empty();
     let program_is_vendor = !program.is_empty() && path_trust(&first_executable(program), ctx) == PathTrust::Vendor;
-    let level = if exposes_admin_port || any_port_any_program {
+    let modifier_is_vendor = path_trust(modifier, ctx) == PathTrust::Vendor;
+    let level = if exposes_admin_port || (any_port_any_program && !modifier_is_vendor) {
         Level::Critical
-    } else if all_profiles && !program_is_vendor {
+    } else if any_port_any_program || (all_profiles && !program_is_vendor) {
         Level::Warn
     } else {
         return None;

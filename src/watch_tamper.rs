@@ -57,8 +57,14 @@ impl Baseline {
         let Some(known) = self.known.as_ref() else { return HashSet::new() };
         let before = count_by_category(known.values().map(|t| t.category));
         let now = count_by_category(current.iter().map(|f| f.category));
+        let blind: HashSet<&'static str> =
+            current.iter().filter(|f| f.is_limited_visibility()).map(|f| f.category).collect();
         let mut guarded = HashSet::new();
         for (category, was) in before {
+            if blind.contains(category) {
+                guarded.insert(category);
+                continue;
+            }
             let is_now = now.get(category).copied().unwrap_or(0);
             if is_now * 2 >= was {
                 self.collapsed_polls.remove(category);

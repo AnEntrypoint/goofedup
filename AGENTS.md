@@ -82,6 +82,7 @@
 ## Windows posture audit (`audit_win`)
 - `collect(Tier::Native | Tier::Shell)`; Tier::Shell PowerShell is always bounded by a 25 s kill (PowerShell hangs in Limited scheduled-task contexts).
 - `Finding{level,category,key,title,evidence,alert_on_change}`: `key` is baseline identity, `fingerprint()` = (level,title,evidence) is the change signal: never put pids/timestamps in title/evidence. The watcher ignores a category that shrinks to under half its baseline for 2 polls.
+- `watch_tamper` never accepts a category collapse while that category is currently reporting a `limited-visibility` finding: a failed PowerShell/WMI query drops its rows, the collapse was accepted after 2 polls, and the rows returned as "new" on every flap (the Windows-shipped `SCM Event Log Filter`/`NTEventLogEventConsumer` pair and the Defender status WARNed 6x on 2026-09-30). Absence proves nothing while visibility is degraded.
 - ACL checks count ownership as writable (owner can rewrite the DACL). A missing path is "plantable" when the nearest existing ancestor allows adding files. Windows-shipped `@` and AppPkgId firewall rules are skipped by design. Windows Hello accounts show as PASSWD_NOTREQD.
 
 ## Trust and signatures (`trust.rs`, `process_trust.rs`, `lineage.rs`)
@@ -96,6 +97,7 @@
 ## Events, self-protection, hardened install
 - `watch_events` uses EvtSubscribe push with bookmarks in `~/.goofedup/events.bookmarks.json`: Sysmon/Security XPath queries take seconds on 1 GB logs. `EvtNext` ERROR_TIMEOUT (1460) is NOT end-of-results (treating it so skipped events). Windows 11 build 26200 logs firewall changes as 2097/2099/2052/2059, not 2004-2006. First-run lookback is 1 h (6 h Defender) per channel in `event_rules::CHANNELS`; it was 24 h and a fresh bookmark replayed ~100 Criticals in 14 s. Sysmon Company is `-` for unsigned.
 - Hardened data-dir ACL is user read-only: an un-hardened CLI cannot write log/config there. A user-level process can pre-create mutex `Global\AnEntrypoint.Goofedup.SingleInstance` to make the elevated instance exit (open issue). `runas /trustlevel` yields a restricted HIGH token, not medium; launch through explorer.exe for a real medium token.
+- `firewall-rule` (event path) keeps an inbound allow with no ports and no program binding CRITICAL unless the modifying application is under an `os_vendor_root`: Windows' own Store/GPO rules arrive that shape from `svchost.exe` (4 CRITICALs 2026-09-30); a user-writable or unknown modifier still fires CRITICAL. `audit_win/firewall.rs` already skips the same rules by `AppPkgId`/`@` name, which the event record does not carry.
 - Noise: Defender flags gm `node -e` dispatch scripts as Trojan:Win32/SuspExec.SE (expected here); agentplug-runner CreateRemoteThread (Sysmon 8) is a known-benign shape.
 
 ## GUI
