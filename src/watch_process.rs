@@ -157,9 +157,10 @@ fn check_read_burst(
     }
 
     let name = p.name().to_string_lossy().to_string();
-    let name_lower = name.to_lowercase();
-    let is_known_high_throughput_tool =
-        cfg.known_high_throughput_tool_names.iter().any(|n| n.to_lowercase() == name_lower);
+    let is_known_high_throughput_tool = cfg
+        .known_high_throughput_tool_names
+        .iter()
+        .any(|n| crate::lineage::normalized_name(n) == crate::lineage::normalized_name(&name));
     let exe_path_lower = p.exe().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let runs_from_os_vendor_root = !exe_path_lower.is_empty()
         && cfg.os_vendor_roots.iter().any(|root| {

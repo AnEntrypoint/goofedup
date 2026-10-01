@@ -70,7 +70,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
             let is_known_high_throughput_tool = cfg
                 .known_high_throughput_tool_names
                 .iter()
-                .any(|n| n.eq_ignore_ascii_case(&c.process_name));
+                .any(|n| crate::lineage::normalized_name(n) == crate::lineage::normalized_name(&c.process_name));
             let effective_hosts_threshold = if is_known_high_throughput_tool {
                 (cfg.scan_distinct_hosts_threshold as f64 * cfg.known_high_throughput_tool_multiplier) as usize
             } else {
