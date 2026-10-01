@@ -183,8 +183,7 @@ fn check_read_burst(
 
     let exe_path_raw = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let path_is_corroborating = is_denied_exec_path(&exe_path_raw, &cfg.deny_exec_path_fragments).is_some()
-        || (!(is_locally_built_binary || is_known_high_throughput_tool)
-            && is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots));
+        || (!is_locally_built_binary && is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots));
     let effective_absolute_threshold = if path_is_corroborating {
         ((effective_absolute_threshold as f64) * cfg.read_burst_corroborated_threshold_fraction) as u64
     } else {
@@ -197,7 +196,7 @@ fn check_read_burst(
     let single_poll_absolute_burst = delta >= effective_absolute_threshold
         && !absolute_reading_is_within_own_established_baseline;
 
-    let relative_spike_needs_ceiling_check = gets_high_throughput_relaxation && !path_is_corroborating;
+    let relative_spike_needs_ceiling_check = gets_high_throughput_relaxation;
     let single_poll_relative_spike = tracker.avg_delta > cfg.read_burst_baseline_warm_up_floor_bytes
         && (delta as f64) >= tracker.avg_delta * effective_relative_multiplier
         && (!relative_spike_needs_ceiling_check

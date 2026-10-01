@@ -643,6 +643,9 @@ impl Config {
                 allowed_exec_roots.push(PathBuf::from(windir.clone()));
                 os_vendor_roots.push(PathBuf::from(windir));
             }
+            if let Ok(program_data) = std::env::var("ProgramData") {
+                allowed_exec_roots.push(PathBuf::from(program_data).join("Microsoft").join("Windows Defender"));
+            }
             if let Ok(sysdrive) = std::env::var("SystemDrive") {
                 let sysdrive = sysdrive.trim_end_matches('\\').to_string();
                 for minor in PYTHON_ALL_USERS_INSTALL_MIN_MINOR_VERSION..=PYTHON_ALL_USERS_INSTALL_MAX_MINOR_VERSION {
