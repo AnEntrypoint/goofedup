@@ -157,10 +157,9 @@ fn check_read_burst(
     }
 
     let name = p.name().to_string_lossy().to_string();
-    let is_known_high_throughput_tool = cfg
-        .known_high_throughput_tool_names
-        .iter()
-        .any(|n| crate::lineage::normalized_name(n) == crate::lineage::normalized_name(&name));
+    let name_lower = name.to_lowercase();
+    let is_known_high_throughput_tool =
+        cfg.known_high_throughput_tool_names.iter().any(|n| n.to_lowercase() == name_lower);
     let exe_path_lower = p.exe().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     let runs_from_os_vendor_root = !exe_path_lower.is_empty()
         && cfg.os_vendor_roots.iter().any(|root| {
@@ -184,7 +183,8 @@ fn check_read_burst(
 
     let exe_path_raw = p.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
     let path_is_corroborating = is_denied_exec_path(&exe_path_raw, &cfg.deny_exec_path_fragments).is_some()
-        || (!is_locally_built_binary && is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots));
+        || (!(is_locally_built_binary || is_known_high_throughput_tool)
+            && is_unlisted_exec_path(&exe_path_raw, &cfg.allowed_exec_roots));
     let effective_absolute_threshold = if path_is_corroborating {
         ((effective_absolute_threshold as f64) * cfg.read_burst_corroborated_threshold_fraction) as u64
     } else {
