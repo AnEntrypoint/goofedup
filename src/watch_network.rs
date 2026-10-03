@@ -238,7 +238,12 @@ mod windows_impl {
     }
 
     fn pid_name_map() -> std::collections::HashMap<u32, String> {
-        let sys = sysinfo::System::new_all();
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
         sys.processes()
             .iter()
             .map(|(pid, proc)| (pid.as_u32(), proc.name().to_string_lossy().to_string()))
@@ -258,12 +263,8 @@ mod windows_impl {
 
     pub fn firewall_profile_state() -> Vec<(String, bool)> {
         let mut out = Vec::new();
-        let Ok(o) = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Get-NetFirewallProfile | Select-Object Name,Enabled | ConvertTo-Json -Compress",
-            ])
+        let Ok(o) = Command::new("netsh")
+            .args(["advfirewall", "show", "allprofiles", "state"])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
         else {
@@ -272,19 +273,17 @@ mod windows_impl {
         let Ok(text) = String::from_utf8(o.stdout) else {
             return out;
         };
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else {
-            return out;
-        };
-        let items: Vec<&serde_json::Value> = match &val {
-            serde_json::Value::Array(a) => a.iter().collect(),
-            serde_json::Value::Object(_) => vec![&val],
-            _ => vec![],
-        };
-        for item in items {
-            let name = item.get("Name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let enabled = item.get("Enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-            if !name.is_empty() {
-                out.push((name, enabled));
+        let mut profile = String::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(name) = line.strip_suffix("Profile Settings:") {
+                profile = name.trim().to_string();
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("State") {
+                if !profile.is_empty() {
+                    out.push((profile.clone(), value.trim().eq_ignore_ascii_case("on")));
+                }
             }
         }
         out

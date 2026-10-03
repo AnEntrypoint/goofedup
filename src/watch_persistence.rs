@@ -133,34 +133,34 @@ mod windows_impl {
 
     pub fn enumerate() -> Vec<PersistenceEntry> {
         let mut out = Vec::new();
-        out.extend(services());
-        out.extend(scheduled_tasks());
+        out.extend(script_backed_entries());
         out.extend(run_keys());
         out
     }
 
-    fn services() -> Vec<PersistenceEntry> {
+    fn script_backed_entries() -> Vec<PersistenceEntry> {
         let out = Command::new("powershell")
             .args([
                 "-NoProfile",
                 "-Command",
-                "Get-CimInstance Win32_Service | Select-Object -Property Name,PathName | ConvertTo-Json -Compress",
+                "$svc = @(Get-CimInstance Win32_Service | Select-Object -Property Name,PathName); \
+                 $tasks = @(Get-ScheduledTask | ForEach-Object { $a = ($_.Actions | Select-Object -First 1); \
+                 [PSCustomObject]@{ Name = $_.TaskName; PathName = ($a.Execute + ' ' + $a.Arguments) } }); \
+                 [PSCustomObject]@{ services = $svc; tasks = $tasks } | ConvertTo-Json -Compress -Depth 6",
             ])
             .creation_flags(CREATE_NO_WINDOW)
             .output();
-        parse_ps_json_list(out, "service", "Name", "PathName")
-    }
-
-    fn scheduled_tasks() -> Vec<PersistenceEntry> {
-        let out = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                "Get-ScheduledTask | ForEach-Object { $a = ($_.Actions | Select-Object -First 1); [PSCustomObject]@{ Name = $_.TaskName; PathName = \"$($a.Execute) $($a.Arguments)\" } } | ConvertTo-Json -Compress",
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        parse_ps_json_list(out, "scheduled-task", "Name", "PathName")
+        let mut out_entries = Vec::new();
+        let Ok(o) = out else { return out_entries };
+        let Ok(text) = String::from_utf8(o.stdout) else {
+            return out_entries;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else {
+            return out_entries;
+        };
+        out_entries.extend(parse_ps_json_list(val.get("services"), "service", "Name", "PathName"));
+        out_entries.extend(parse_ps_json_list(val.get("tasks"), "scheduled-task", "Name", "PathName"));
+        out_entries
     }
 
     fn run_keys() -> Vec<PersistenceEntry> {
@@ -223,20 +223,14 @@ mod windows_impl {
     }
 
     fn parse_ps_json_list(
-        res: std::io::Result<std::process::Output>,
+        value: Option<&serde_json::Value>,
         kind: &'static str,
         name_field: &str,
         cmd_field: &str,
     ) -> Vec<PersistenceEntry> {
         let mut out = Vec::new();
-        let Ok(o) = res else { return out };
-        let Ok(text) = String::from_utf8(o.stdout) else {
-            return out;
-        };
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else {
-            return out;
-        };
-        let items: Vec<&serde_json::Value> = match &val {
+        let Some(val) = value else { return out };
+        let items: Vec<&serde_json::Value> = match val {
             serde_json::Value::Array(a) => a.iter().collect(),
             serde_json::Value::Object(_) => vec![&val],
             _ => vec![],

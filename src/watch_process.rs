@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use sysinfo::{Pid, System};
+use sysinfo::{Pid, ProcessesToUpdate, ProcessRefreshKind, System, UpdateKind};
 
 const CMDLINE_EVIDENCE_HEAD_CHARS: usize = 1200;
 const DECODED_COMMAND_EVIDENCE_HEAD_CHARS: usize = 300;
@@ -53,7 +53,16 @@ fn config_snapshot(cfg_shared: &SharedConfig) -> Arc<Config> {
 }
 
 fn fresh_system_snapshot() -> System {
-    System::new_all()
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing()
+            .with_disk_usage()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always),
+    );
+    sys
 }
 
 pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
