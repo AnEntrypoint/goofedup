@@ -11,7 +11,6 @@ const RULES_PATH: &str = "SYSTEM\\CurrentControlSet\\Services\\SharedAccess\\Par
 
 #[derive(Default)]
 struct Rule {
-    id: String,
     name: String,
     allow: bool,
     active: bool,
@@ -25,8 +24,8 @@ struct Rule {
     is_store_app: bool,
 }
 
-fn parse_rule(id: &str, raw: &str) -> Rule {
-    let mut rule = Rule { id: id.to_string(), ..Default::default() };
+fn parse_rule(raw: &str) -> Rule {
+    let mut rule = Rule::default();
     for part in raw.split('|') {
         let Some((field, value)) = part.split_once('=') else { continue };
         match field {
@@ -78,9 +77,9 @@ pub fn inbound_rules(ctx: &Context) -> Vec<Finding> {
         Err(OpenError::Missing) => return Vec::new(),
     };
     let mut findings = Vec::new();
-    for (id, value) in key.values() {
+    for (_id, value) in key.values() {
         let Some(raw) = value.text() else { continue };
-        let rule = parse_rule(&id, raw);
+        let rule = parse_rule(&raw);
         if !rule.allow || !rule.active || !rule.inbound || rule.is_store_app || is_windows_shipped(&rule) {
             continue;
         }
@@ -147,7 +146,16 @@ pub fn inbound_rules(ctx: &Context) -> Vec<Finding> {
             if rule.local_ports.is_empty() { "-".to_string() } else { rule.local_ports.join(",") },
             rule.protocol.as_deref().unwrap_or("Any")
         );
-        findings.push(Finding::new(level, CATEGORY, format!("firewall:{}", rule.id), title, evidence).tracked());
+        let identity = format!(
+            "firewall:{}:{}:{}:{}:{}:{}",
+            rule.name.to_lowercase(),
+            rule.program.as_deref().unwrap_or("-").to_lowercase(),
+            rule.service.as_deref().unwrap_or("-").to_lowercase(),
+            rule.local_ports.join(","),
+            rule.protocol.as_deref().unwrap_or("-"),
+            rule.profiles.join(",")
+        );
+        findings.push(Finding::new(level, CATEGORY, identity, title, evidence).tracked());
     }
     findings
 }

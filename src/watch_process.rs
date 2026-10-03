@@ -127,6 +127,12 @@ fn total_read_bytes(_pid: Pid, p: &sysinfo::Process) -> u64 {
     p.disk_usage().total_read_bytes
 }
 
+const KERNEL_RESERVED_PID_CEILING: u32 = 4;
+
+fn is_kernel_attributed_pid(pid: Pid) -> bool {
+    cfg!(target_os = "windows") && pid.as_u32() <= KERNEL_RESERVED_PID_CEILING
+}
+
 fn check_read_burst(
     cfg: &Config,
     alerts: &AlertSink,
@@ -134,6 +140,10 @@ fn check_read_burst(
     p: &sysinfo::Process,
     trackers: &mut HashMap<Pid, ReadTracker>,
 ) {
+    if is_kernel_attributed_pid(pid) {
+        return;
+    }
+
     #[cfg(target_os = "linux")]
     let total_read = total_read_bytes(pid);
     #[cfg(not(target_os = "linux"))]
