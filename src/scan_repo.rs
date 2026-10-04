@@ -717,8 +717,16 @@ pub fn emit(alerts: &AlertSink, finding: &Finding) {
 }
 
 fn should_descend(entry: &DirEntry) -> bool {
+    if entry.path().to_string_lossy().len() > crate::scan_js::MAX_SCAN_PATH_CHARS {
+        return false;
+    }
     if !entry.file_type().is_dir() {
         return true;
+    }
+    if entry.depth() > crate::scan_js::MAX_SCAN_DEPTH
+        || crate::scan_js::is_stacked_node_modules(entry.path())
+    {
+        return false;
     }
     let name = entry.file_name().to_string_lossy();
     if SKIP_DIR_NAMES.iter().any(|skip| *skip == name) {

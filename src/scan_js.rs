@@ -15,6 +15,12 @@ const ASSET_EXTENSIONS: &[&str] = crate::command_shape::NON_SOURCE_ASSET_EXTENSI
 const ASSET_PREFIX_BYTES: u64 = 64 * 1024;
 
 const SKIP_DIR_NAMES: &[&str] = &[".git", ".hg", ".svn", "target"];
+const NODE_MODULES_DIR_NAME: &str = "node_modules";
+pub(crate) const MAX_SCAN_DEPTH: usize = 24;
+#[cfg(windows)]
+pub(crate) const MAX_SCAN_PATH_CHARS: usize = 240;
+#[cfg(not(windows))]
+pub(crate) const MAX_SCAN_PATH_CHARS: usize = 1024;
 const CONFIG_FILE_NAME_INFIX: &str = ".config.";
 const ASAR_HEADER_PICKLE_SIZE_OFFSET: usize = 4;
 const ASAR_JSON_LENGTH_OFFSET: usize = 12;
@@ -27,6 +33,14 @@ const MIN_ABSOLUTE_PATH_TOKEN_LEN: usize = 4;
 
 fn is_js_file(path: &Path) -> bool {
     ext_is(path, JS_EXTENSIONS)
+}
+
+fn is_node_modules_dir(path: &Path) -> bool {
+    path.file_name().map(|n| n.to_string_lossy() == NODE_MODULES_DIR_NAME).unwrap_or(false)
+}
+
+pub(crate) fn is_stacked_node_modules(path: &Path) -> bool {
+    is_node_modules_dir(path) && path.parent().map(is_node_modules_dir).unwrap_or(false)
 }
 
 fn is_config_file(path: &Path) -> bool {
@@ -123,13 +137,23 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
     let mut total_flagged = 0usize;
     let mut total_scanned = 0usize;
 
+    let mut skipped_dirs = 0usize;
     let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
-        if e.file_type().is_dir() {
-            let name = e.file_name().to_string_lossy();
-            !SKIP_DIR_NAMES.iter().any(|s| *s == name)
-        } else {
-            true
+        if e.path().to_string_lossy().len() > MAX_SCAN_PATH_CHARS {
+            if e.file_type().is_dir() {
+                skipped_dirs += 1;
+            }
+            return false;
         }
+        if !e.file_type().is_dir() {
+            return true;
+        }
+        if e.depth() > MAX_SCAN_DEPTH || is_stacked_node_modules(e.path()) {
+            skipped_dirs += 1;
+            return false;
+        }
+        let name = e.file_name().to_string_lossy();
+        !SKIP_DIR_NAMES.iter().any(|s| *s == name)
     });
 
     for entry in walker.filter_map(|e| e.ok()) {
@@ -216,6 +240,17 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
                 v.reasons.join("; "),
             );
         }
+    }
+
+    if skipped_dirs > 0 {
+        alerts.warn(
+            "repo-scan",
+            format!(
+                "left {skipped_dirs} director(ies) under {} uninspected: deeper than {MAX_SCAN_DEPTH} levels, a node_modules copy stacked inside another, or a path over {MAX_SCAN_PATH_CHARS} characters -- anything planted below those limits is not seen by this scan",
+                root.display()
+            ),
+            format!("root={}", root.display()),
+        );
     }
 
     alerts.info(
