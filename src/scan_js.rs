@@ -137,6 +137,8 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
     let mut total_flagged = 0usize;
     let mut total_scanned = 0usize;
 
+    alerts.info("repo-scan", format!("starting dependency scan of {}", root.display()));
+
     let mut skipped_dirs = 0usize;
     let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
         if e.path().to_string_lossy().len() > MAX_SCAN_PATH_CHARS {
