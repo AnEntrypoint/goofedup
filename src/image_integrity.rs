@@ -13,9 +13,43 @@ pub struct ImageWatch {
     reported: HashSet<(Pid, u64)>,
 }
 
+const UPDATER_RENAME_TOKENS: [&str; 10] = [
+    "old",
+    "prev",
+    "previous",
+    "backup",
+    "bak",
+    "selfupdated",
+    "release",
+    "pinned",
+    "replaced",
+    "superseded",
+];
+
 fn is_updater_rename(original_path: &str, moved_path: &str) -> bool {
+    let original = std::path::Path::new(original_path);
+    if !original.is_file() {
+        return false;
+    }
     let moved_name = moved_path.rsplit(['\\', '/']).next().unwrap_or("").to_lowercase();
-    (moved_name.contains(".old") || moved_name.starts_with("old_")) && std::path::Path::new(original_path).is_file()
+    if moved_name.starts_with("old_") {
+        return true;
+    }
+    if std::path::Path::new(moved_path).parent() != original.parent() {
+        return false;
+    }
+    let Some(original_name) = original.file_name().map(|n| n.to_string_lossy().to_lowercase()) else {
+        return false;
+    };
+    let Some(suffix) = moved_name.strip_prefix(&original_name) else {
+        return false;
+    };
+    if !suffix.starts_with(['.', '-', '_']) {
+        return false;
+    }
+    let tokens: Vec<&str> = suffix.split(|c: char| c == '.' || c == '-' || c == '_').filter(|t| !t.is_empty()).collect();
+    tokens.iter().any(|t| UPDATER_RENAME_TOKENS.contains(t))
+        || tokens.iter().any(|t| t.len() >= 6 && t.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn format_time(t: SystemTime) -> String {
