@@ -28,6 +28,21 @@ fn has_config_key(path: &Path, key_suffix: &str) -> bool {
     })
 }
 
+fn git_has_store_helper(home: &Path, appdata: &Path) -> bool {
+    [home.join(".gitconfig"), home.join(".config").join("git").join("config"), appdata.join("Git").join("config")]
+        .iter()
+        .any(|path| {
+            std::fs::read_to_string(path)
+                .map(|content| {
+                    content.lines().any(|line| {
+                        let (key, value) = line.split_once('=').unwrap_or(("", ""));
+                        key.trim().ends_with("helper") && value.trim().starts_with("store")
+                    })
+                })
+                .unwrap_or(false)
+        })
+}
+
 fn report(path: &Path, what: &str, detail: String) -> Finding {
     Finding::new(
         Level::Warn,
@@ -49,7 +64,12 @@ pub fn plaintext_stores(_ctx: &Context) -> Vec<Finding> {
 
     let git_credentials = home.join(".git-credentials");
     if git_credentials.is_file() {
-        findings.push(report(&git_credentials, "git credential helper 'store' file", format!("{} entries, {}", line_count(&git_credentials), modified_stamp(&git_credentials))));
+        let what = if git_has_store_helper(&home, &appdata) {
+            "git credential helper 'store' file"
+        } else {
+            "git credentials file (no 'store' helper is configured, so git does not read it)"
+        };
+        findings.push(report(&git_credentials, what, format!("{} entries, {}", line_count(&git_credentials), modified_stamp(&git_credentials))));
     }
     let npmrc = home.join(".npmrc");
     if npmrc.is_file() && has_config_key(&npmrc, "_authToken") {
