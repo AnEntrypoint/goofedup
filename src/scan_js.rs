@@ -263,7 +263,7 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
     total_flagged
 }
 
-const RESPONSE_COOLDOWN: Duration = Duration::from_secs(30 * 60);
+const RESPONSE_COOLDOWN: Duration = Duration::from_secs(120 * 60);
 
 pub struct AlertResponse {
     last_scan_start_by_root: Mutex<HashMap<PathBuf, Instant>>,
