@@ -121,6 +121,11 @@ impl ImageWatch {
                 let evidence = format!("exe={exe_display} {reason}");
                 match baseline.as_ref().filter(|(_, seen_path, _)| is_updater_rename(seen_path, &exe_display)) {
                     Some(_) => alerts.warn("image-replaced-after-start", format!("{message} (updater-shaped rename: original path repopulated)"), evidence),
+                    None if is_runner_self_handoff(std::path::Path::new(&exe_display)) => alerts.warn(
+                        "image-replaced-after-start",
+                        format!("{message} (agentplug runner self-handoff: image sha256 matches its own BOOT record)"),
+                        evidence,
+                    ),
                     None => alerts.critical("image-replaced-after-start", message, evidence),
                 }
             }
@@ -128,6 +133,28 @@ impl ImageWatch {
         self.baselines.retain(|pid, _| sys.process(*pid).is_some());
         self.reported.retain(|(pid, _)| sys.process(*pid).is_some());
     }
+}
+
+fn is_runner_self_handoff(exe: &std::path::Path) -> bool {
+    use sha2::{Digest, Sha256};
+    let is_runner = exe
+        .file_name()
+        .map(|name| name.to_string_lossy().starts_with("agentplug-runner"))
+        .unwrap_or(false);
+    if !is_runner {
+        return false;
+    }
+    let Ok(image) = std::fs::read(exe) else {
+        return false;
+    };
+    let digest = format!("{:x}", Sha256::digest(&image));
+    let daemon_log = crate::config::dirs_home().join(".agentplug").join("daemon.log");
+    let Ok(log) = std::fs::read_to_string(daemon_log) else {
+        return false;
+    };
+    log.lines()
+        .filter(|line| line.contains("BOOT pid="))
+        .any(|line| line.split_whitespace().any(|token| token.strip_prefix("exe_sha256=") == Some(digest.as_str())))
 }
 
 impl Default for ImageWatch {

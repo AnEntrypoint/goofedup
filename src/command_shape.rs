@@ -6,6 +6,16 @@ pub const NON_SOURCE_ASSET_EXTENSIONS: &[&str] = &[
     "mp3", "mp4", "pdf", "txt", "json", "map", "bin", "dat",
 ];
 
+const JS_CARRIER_EXTENSIONS: &[&str] = &[
+    "woff", "woff2", "ttf", "eot", "otf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "ico",
+];
+
+pub fn is_js_carrier(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| JS_CARRIER_EXTENSIONS.iter().any(|known| known.eq_ignore_ascii_case(ext)))
+}
+
 #[derive(Default)]
 pub struct CommandShape {
     pub executed_asset: Option<String>,

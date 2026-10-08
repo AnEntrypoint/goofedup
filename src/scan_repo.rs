@@ -587,6 +587,7 @@ fn workflow_findings(path: &Path, text: &str) -> Vec<Finding> {
 fn asset_findings(path: &Path) -> Vec<Finding> {
     read_prefix(path, ASSET_PREFIX_BYTES)
         .and_then(|bytes| find_javascript_masquerading_as_asset(&bytes))
+        .filter(|_| command_shape::is_js_carrier(path))
         .map(|verdict| {
             Finding::critical(
                 "js-masquerading-as-asset",

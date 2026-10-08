@@ -187,7 +187,7 @@ pub fn scan_project(root: &Path, alerts: &AlertSink) -> usize {
                 continue;
             };
             total_scanned += 1;
-            if let Some(v) = find_javascript_masquerading_as_asset(&bytes) {
+            if let Some(v) = find_javascript_masquerading_as_asset(&bytes).filter(|_| crate::command_shape::is_js_carrier(path)) {
                 total_flagged += 1;
                 alerts.critical(
                     "js-masquerading-as-asset",
