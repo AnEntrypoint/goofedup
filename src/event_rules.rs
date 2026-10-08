@@ -327,9 +327,9 @@ pub fn classify(ev: &EventRecord, ctx: &RuleContext) -> Option<Finding> {
             format!("{} by={}\\{}", stamp(ev), ev.field("SubjectDomainName"), ev.field("SubjectUserName")),
         ),
         (CH_FIREWALL, 2059) => finding(
-            Level::Critical,
+            Level::Warn,
             "firewall-rule",
-            "all Windows Firewall rules were deleted (firewall reset)".to_string(),
+            "Windows Firewall rule store reset reported (no modifying application; live rules are checked by the firewall posture watcher)".to_string(),
             format!("{} modified_by={}", stamp(ev), ev.field("ModifyingApplication")),
         ),
         (CH_FIREWALL, 2004 | 2005 | 2006 | 2097 | 2099 | 2052) => firewall_rule(ev, ctx),
@@ -396,8 +396,9 @@ fn defender_detection(ev: &EventRecord) -> Option<Finding> {
         _ => "CRITICALLY FAILED to take action against",
     };
     let threat = ev.field("Threat Name");
+    let level = if ev.event_id == 1117 { Level::Warn } else { Level::Critical };
     finding(
-        Level::Critical,
+        level,
         "defender-detection",
         format!(
             "Defender {verb} {threat} ({}) at {}",

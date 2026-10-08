@@ -393,11 +393,22 @@ pub fn find_config_payload_disproportion(content: &str) -> Option<Verdict> {
 
 const APPENDED_PACKED_MIN_TAIL_BYTES: usize = 3000;
 
+const OBFUSCATOR_IDENTIFIER_MIN_COUNT: usize = 3;
+
+fn obfuscator_hex_identifier_count(line: &str) -> usize {
+    line.match_indices("_0x")
+        .filter(|(at, _)| {
+            line.as_bytes()
+                .get(at + 3..at + 6)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+        })
+        .count()
+}
+
 fn line_looks_like_packed_iife(line: &str) -> bool {
-    if line.contains("global['!']") || line.contains("global[\"!\"]") {
-        return true;
-    }
-    line.contains("var _0x") && (line.contains("(function(") || line.contains("(function ("))
+    let stamped = line.contains("global['!']") || line.contains("global[\"!\"]");
+    let iife = line.contains("var _0x") && (line.contains("(function(") || line.contains("(function ("));
+    (stamped || iife) && obfuscator_hex_identifier_count(line) >= OBFUSCATOR_IDENTIFIER_MIN_COUNT
 }
 
 pub fn find_appended_packed_payload(content: &str) -> Option<Verdict> {
