@@ -115,5 +115,11 @@
 - `alert_window.rs`: `compute_card_layout` is stateless and recomputed on every paint/hit-test (never memoize). The feed child window is created WITHOUT `WS_VISIBLE` and shown after `GWLP_USERDATA` (`CardFeedState`) is attached: a visible child can get `WM_PAINT` inside `CreateWindowExW` before state exists, painting an empty feed with no scroll range (cause of live scroll-check failures). `OPEN_FEED_HWND` is a single slot (second window overwrites; accepted); feed `WM_DESTROY` clears it before freeing state. Refresh repaints only on `entries_fingerprint` change and re-expands only grouped cards by (category, key). ListView row height is set via a 0-image small-icon imagelist (`set_report_row_height_via_small_icon_imagelist`, intentionally never destroyed). NUL-stripping before `LVM_INSERTITEMW` and skipping empty text in owner-draw are crash guards.
 - Known leak: the feed's base and bold `HFONT`s are never deleted (feed `WM_DESTROY` frees only `CardFeedState`); predates the sweep.
 
+## Backlog (not implemented; validated against src 2026-10-08)
+- Plaintext credential exposure: flag OAuth or `gho_` tokens in tracked files and in git remote URLs (`https://x-access-token:...@github.com/...` lives in `.git/config`, which content scanners miss). Full PRD in the memory directory (`prd-plaintext-credential-exposure-watcher`).
+- Committed-secret scan: flag credentials committed to history, not only in the working tree (`prd-committed-secret-scan`).
+- Org-wide sweep mode: an on-demand walk of every local clone against `gh repo list <org>`, reporting clean or compromised per repo (`prd-org-wide-repo-sweep`).
+- Stale-clone drift: flag local clones far behind origin, to catch unpatched or stale bases (`prd-stale-clone-drift-watcher`).
+
 ## Incident context
 - HiddenSpawn launcher: hidden `.vscode/tasks.json` with `runOn: folderOpen` running node on `fa-solid-400.woff2`, plus `task.allowAutomaticTasks`, `config.bat` in `.gitignore`, and a decoy `public/fonts` README ("Blockchain Explorer"). Forged commits are amended tip commits keeping CI epochs with a +0200 committer tz. 2026-09-19: mass force-push wave via lanmower's `gho_` token. Two confirmed repo compromises; both delivery vectors are covered by `scan_repo`.
