@@ -55,32 +55,6 @@ const SHELL_AND_SCRIPT_INTERPRETER_NAMES: [&str; 14] = [
     "osascript",
 ];
 
-const SYNC_AND_BACKUP_TOOL_NAMES: [&str; 7] = [
-    "syncthing.exe",
-    "syncthing",
-    "onedrive.exe",
-    "dropbox.exe",
-    "backblaze.exe",
-    "rsync",
-    "robocopy.exe",
-];
-const BROWSER_AND_ELECTRON_APP_NAMES: [&str; 7] = [
-    "chrome.exe",
-    "chrome",
-    "firefox.exe",
-    "firefox",
-    "msedgewebview2.exe",
-    "msedge.exe",
-    "discord.exe",
-];
-const AGENTPLUG_RUNNER_NAMES: [&str; 2] = ["agentplug-runner.exe", "agentplug-runner"];
-const CODEBASE_SEARCH_TOOL_NAMES: [&str; 2] = ["grep.exe", "grep"];
-const CLAUDE_CLI_NAMES: [&str; 2] = ["claude.exe", "claude"];
-const SECURITY_INDEXER_AND_MEDIA_TOOL_NAMES: [&str; 6] =
-    ["msmpeng.exe", "everything.exe", "ffmpeg.exe", "ffprobe.exe", "goofedup.exe", "goofedup"];
-const GIT_FOR_WINDOWS_REMOTE_THREAD_HELPER_NAMES: [&str; 2] = ["getprocaddr32.exe", "getprocaddr64.exe"];
-
-const AUTOMATION_HARNESS_SHELL_ANCESTOR_NAMES: [&str; 3] = ["bash.exe", "cmd.exe", "claude.exe"];
 
 fn owned_strings(names: &[&str]) -> Vec<String> {
     names.iter().map(|n| n.to_string()).collect()
@@ -709,25 +683,9 @@ impl Config {
             file_read_burst_absolute_bytes_per_poll: DEFAULT_FILE_READ_BURST_ABSOLUTE_BYTES_PER_POLL,
             file_read_burst_relative_multiplier: DEFAULT_FILE_READ_BURST_RELATIVE_MULTIPLIER,
             file_read_burst_uncorroborated_ceiling_bytes: DEFAULT_FILE_READ_BURST_UNCORROBORATED_CEILING_BYTES,
-            known_high_throughput_tool_names: [
-                &SYNC_AND_BACKUP_TOOL_NAMES[..],
-                &BROWSER_AND_ELECTRON_APP_NAMES[..],
-                &AGENTPLUG_RUNNER_NAMES[..],
-                &CODEBASE_SEARCH_TOOL_NAMES[..],
-                &CLAUDE_CLI_NAMES[..],
-                &SECURITY_INDEXER_AND_MEDIA_TOOL_NAMES[..],
-            ]
-            .iter()
-            .flat_map(|group| owned_strings(group))
-            .collect(),
+            known_high_throughput_tool_names: Vec::new(),
             known_high_throughput_tool_multiplier: DEFAULT_KNOWN_HIGH_THROUGHPUT_TOOL_MULTIPLIER,
-            known_automation_parent_names: [
-                &AGENTPLUG_RUNNER_NAMES[..],
-                &AUTOMATION_HARNESS_SHELL_ANCESTOR_NAMES[..],
-            ]
-            .iter()
-            .flat_map(|group| owned_strings(group))
-            .collect(),
+            known_automation_parent_names: Vec::new(),
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             log_path,
             read_burst_window_size: DEFAULT_READ_BURST_WINDOW_SIZE,
@@ -744,10 +702,7 @@ impl Config {
             trusted_publishers: crate::trust::default_trusted_publishers(),
             unsigned_user_writable_policy: UnsignedUserWritablePolicy::default(),
             repo_watch_roots: default_repo_watch_roots(&home),
-            known_benign_event_sources: [&AGENTPLUG_RUNNER_NAMES[..1], &GIT_FOR_WINDOWS_REMOTE_THREAD_HELPER_NAMES[..]]
-                .iter()
-                .flat_map(|group| owned_strings(group))
-                .collect(),
+            known_benign_event_sources: Vec::new(),
         }
     }
 }
