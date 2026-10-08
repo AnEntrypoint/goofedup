@@ -131,3 +131,12 @@ cargo build --release --features gui --bin goofedup-gui
 ## Verification
 
 No standing test suite. Every change is verified by live-witnessing the real code path against real files, real spawned processes, and the real `notify`/`sysinfo`-driven watch loops -- no mocks, no fixtures standing in for the real thing.
+
+## Planned checks (not implemented yet)
+
+- **Plaintext credential exposure:** tokens in tracked files and in git remote URLs.
+- **Committed-secret scan:** credentials that reached git history.
+- **Org-wide sweep mode:** an on-demand walk of every local clone of an org, reporting clean or compromised per repo.
+- **Stale-clone drift:** local clones far behind origin.
+
+These are tracked in AGENTS.md under Backlog.
