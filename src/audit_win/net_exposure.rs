@@ -1,8 +1,8 @@
 use super::pathing::Context;
 use super::registry::{self, OpenError};
-use super::shell::command_output;
 use super::Finding;
 use crate::alert::Level;
+use crate::native_tcp;
 use windows::Win32::System::Registry::HKEY_LOCAL_MACHINE;
 
 const PORTPROXY_CATEGORY: &str = "tamper-portproxy";
@@ -76,34 +76,25 @@ struct Listener {
     pid: u32,
 }
 
-fn parse_listeners(netstat_output: &str) -> Vec<Listener> {
+fn wildcard_listeners() -> Vec<Listener> {
     let mut listeners: Vec<Listener> = Vec::new();
-    for line in netstat_output.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 5 || !parts[0].eq_ignore_ascii_case("TCP") {
+    for row in native_tcp::tcp_rows() {
+        if row.state != native_tcp::MIB_TCP_STATE_LISTEN || !row.remote.is_unspecified() || row.remote_port != 0 {
             continue;
         }
-        if parts[2] != "0.0.0.0:0" && parts[2] != "[::]:0" {
-            continue;
-        }
-        let Some((address, port)) = parts[1].rsplit_once(':') else { continue };
-        let (Ok(port), Ok(pid)) = (port.parse::<u16>(), parts[4].parse::<u32>()) else { continue };
-        let address = address.trim_matches(|c| c == '[' || c == ']').to_string();
+        let address = row.local.to_string();
         if is_loopback(&address) {
             continue;
         }
-        if !listeners.iter().any(|l| l.port == port && l.address == address) {
-            listeners.push(Listener { address, port, pid });
+        if !listeners.iter().any(|l| l.port == row.local_port && l.address == address) {
+            listeners.push(Listener { address, port: row.local_port, pid: row.pid });
         }
     }
     listeners
 }
 
 pub fn listeners(ctx: &Context) -> Vec<Finding> {
-    let Some(output) = command_output("netstat", &["-ano", "-p", "TCP"]) else { return Vec::new() };
-    let v6 = command_output("netstat", &["-ano", "-p", "TCPv6"]).unwrap_or_default();
-    let mut all = parse_listeners(&output);
-    all.extend(parse_listeners(&v6));
+    let all = wildcard_listeners();
     let relevant: Vec<&Listener> = all
         .iter()
         .filter(|l| {
@@ -114,7 +105,12 @@ pub fn listeners(ctx: &Context) -> Vec<Finding> {
     if relevant.is_empty() {
         return Vec::new();
     }
-    let system = sysinfo::System::new_all();
+    let mut system = sysinfo::System::new();
+    system.refresh_processes_specifics(
+        sysinfo::ProcessesToUpdate::All,
+        true,
+        sysinfo::ProcessRefreshKind::nothing().with_exe(sysinfo::UpdateKind::OnlyIfNotSet),
+    );
     relevant
         .into_iter()
         .map(|l| {

@@ -12,6 +12,8 @@ pub mod heuristics;
 pub mod image_integrity;
 pub mod jsonc;
 pub mod lineage;
+#[cfg(windows)]
+pub mod native_tcp;
 pub mod process_trust;
 pub mod repo_fix;
 pub mod scan_js;

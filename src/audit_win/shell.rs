@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const POWERSHELL_TIMEOUT: Duration = Duration::from_secs(25);
-const NATIVE_TOOL_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn run_bounded(mut command: Command, limit: Duration) -> Option<String> {
     let mut child = command
@@ -50,8 +49,3 @@ pub fn json_items(value: &serde_json::Value) -> Vec<&serde_json::Value> {
     }
 }
 
-pub fn command_output(program: &str, args: &[&str]) -> Option<String> {
-    let mut command = Command::new(program);
-    command.args(args);
-    run_bounded(command, NATIVE_TOOL_TIMEOUT)
-}

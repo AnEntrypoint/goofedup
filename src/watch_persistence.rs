@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-const POLL_INTERVAL_MULTIPLIER: u64 = 10;
+const POLL_INTERVAL_MULTIPLIER: u64 = 60;
 const COLLAPSED_ENUMERATION_DIVISOR: usize = 2;
 
 fn enumeration_looks_collapsed(current_len: usize, baseline_len: usize) -> bool {

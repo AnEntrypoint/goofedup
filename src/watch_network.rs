@@ -193,48 +193,30 @@ fn firewall_profile_state() -> Vec<(String, bool)> {
 #[cfg(windows)]
 mod windows_impl {
     use super::Connection;
-    use std::os::windows::process::CommandExt;
-    use std::process::Command;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use crate::native_tcp::{self, MIB_TCP_STATE_ESTABLISHED};
+    use windows::core::HSTRING;
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_QUERY_VALUE,
+    };
 
     pub fn list_connections() -> Vec<Connection> {
-        let mut out = Vec::new();
-        let Ok(o) = Command::new("netstat").args(["-ano", "-p", "TCP"]).creation_flags(CREATE_NO_WINDOW).output() else {
-            return out;
-        };
-        let Ok(text) = String::from_utf8(o.stdout) else {
-            return out;
-        };
         let pid_names = pid_name_map();
-        for line in text.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 5 || parts[0] != "TCP" {
-                continue;
-            }
-            let (Some(remote), Some(state), Some(pid_str)) = (parts.get(2), parts.get(3), parts.get(4)) else {
-                continue;
-            };
-            if *state != "ESTABLISHED" {
-                continue;
-            }
-            let Ok(pid) = pid_str.parse::<u32>() else {
-                continue;
-            };
-            let Some((ip, port)) = split_host_port(remote) else {
-                continue;
-            };
-            if is_local(&ip) {
-                continue;
-            }
-            out.push(Connection {
-                pid,
-                process_name: pid_names.get(&pid).cloned().unwrap_or_default(),
-                remote_ip: ip,
-                remote_port: port,
-            });
-        }
-        out
+        native_tcp::tcp_rows()
+            .into_iter()
+            .filter(|row| row.state == MIB_TCP_STATE_ESTABLISHED && row.remote.is_ipv4())
+            .filter_map(|row| {
+                let remote_ip = row.remote.to_string();
+                if is_local(&remote_ip) {
+                    return None;
+                }
+                Some(Connection {
+                    pid: row.pid,
+                    process_name: pid_names.get(&row.pid).cloned().unwrap_or_default(),
+                    remote_ip,
+                    remote_port: row.remote_port,
+                })
+            })
+            .collect()
     }
 
     fn pid_name_map() -> std::collections::HashMap<u32, String> {
@@ -250,43 +232,37 @@ mod windows_impl {
             .collect()
     }
 
-    fn split_host_port(s: &str) -> Option<(String, u16)> {
-        let idx = s.rfind(':')?;
-        let ip = s[..idx].to_string();
-        let port = s[idx + 1..].parse().ok()?;
-        Some((ip, port))
-    }
-
     fn is_local(ip: &str) -> bool {
         ip == "127.0.0.1" || ip == "::1" || ip.starts_with("169.254.") || ip == "0.0.0.0"
     }
 
+    const FIREWALL_POLICY_KEY: &str = r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy";
+    const FIREWALL_PROFILE_KEYS: [(&str, &str); 3] = [("DomainProfile", "Domain"), ("StandardProfile", "Private"), ("PublicProfile", "Public")];
+
     pub fn firewall_profile_state() -> Vec<(String, bool)> {
-        let mut out = Vec::new();
-        let Ok(o) = Command::new("netsh")
-            .args(["advfirewall", "show", "allprofiles", "state"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-        else {
-            return out;
-        };
-        let Ok(text) = String::from_utf8(o.stdout) else {
-            return out;
-        };
-        let mut profile = String::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if let Some(name) = line.strip_suffix("Profile Settings:") {
-                profile = name.trim().to_string();
-                continue;
-            }
-            if let Some(value) = line.strip_prefix("State") {
-                if !profile.is_empty() {
-                    out.push((profile.clone(), value.trim().eq_ignore_ascii_case("on")));
-                }
+        FIREWALL_PROFILE_KEYS
+            .iter()
+            .filter_map(|(key, name)| firewall_profile_enabled(key).map(|enabled| (name.to_string(), enabled)))
+            .collect()
+    }
+
+    fn firewall_profile_enabled(profile_key: &str) -> Option<bool> {
+        let path = format!("{FIREWALL_POLICY_KEY}\\{profile_key}");
+        let mut hkey = HKEY::default();
+        unsafe {
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, &HSTRING::from(path), 0, KEY_QUERY_VALUE, &mut hkey).is_err() {
+                return None;
             }
         }
-        out
+        let mut data = [0u8; 4];
+        let mut size = data.len() as u32;
+        let status = unsafe {
+            RegQueryValueExW(hkey, &HSTRING::from("EnableFirewall"), None, None, Some(data.as_mut_ptr()), Some(&mut size))
+        };
+        unsafe {
+            let _ = RegCloseKey(hkey);
+        }
+        status.is_ok().then(|| u32::from_le_bytes(data) == 1)
     }
 }
 
