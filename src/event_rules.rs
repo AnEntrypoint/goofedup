@@ -329,7 +329,7 @@ pub fn classify(ev: &EventRecord, ctx: &RuleContext) -> Option<Finding> {
         (CH_FIREWALL, 2059) => finding(
             Level::Warn,
             "firewall-rule",
-            "Windows Firewall rule store reset reported (no modifying application; live rules are checked by the firewall posture watcher)".to_string(),
+            "all Windows Firewall rules were deleted (firewall reset)".to_string(),
             format!("{} modified_by={}", stamp(ev), ev.field("ModifyingApplication")),
         ),
         (CH_FIREWALL, 2004 | 2005 | 2006 | 2097 | 2099 | 2052) => firewall_rule(ev, ctx),
