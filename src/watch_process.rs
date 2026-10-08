@@ -52,17 +52,25 @@ fn config_snapshot(cfg_shared: &SharedConfig) -> Arc<Config> {
     cfg_shared.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
-fn fresh_system_snapshot() -> System {
-    let mut sys = System::new();
+fn refresh_process_counters(sys: &mut System) {
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
-        ProcessRefreshKind::nothing()
-            .with_disk_usage()
-            .with_cmd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always),
+        ProcessRefreshKind::nothing().with_disk_usage(),
     );
-    sys
+}
+
+fn refresh_process_details(sys: &mut System, pids: &[Pid]) {
+    if pids.is_empty() {
+        return;
+    }
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(pids),
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::OnlyIfNotSet),
+    );
 }
 
 pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<AtomicBool>) {
@@ -89,22 +97,33 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
     let mut warned_unlisted_paths: HashSet<String> = HashSet::new();
     let mut trust_watch = ProcessTrust::new();
 
-    let mut known: HashSet<Pid> = {
-        let sys = fresh_system_snapshot();
-        sys.processes().keys().copied().collect()
-    };
+    let mut sys = System::new();
+    refresh_process_counters(&mut sys);
+    let startup_pids: Vec<Pid> = sys.processes().keys().copied().collect();
+    refresh_process_details(&mut sys, &startup_pids);
+    let mut detailed: HashMap<Pid, u64> = sys.processes().iter().map(|(pid, p)| (*pid, p.start_time())).collect();
+    let mut known: HashSet<Pid> = startup_pids.into_iter().collect();
 
     while running.load(Ordering::Relaxed) {
         let cfg = config_snapshot(&cfg_shared);
         std::thread::sleep(Duration::from_secs(cfg.poll_interval_secs));
-        let sys = fresh_system_snapshot();
+        refresh_process_counters(&mut sys);
 
         let current: HashSet<Pid> = sys.processes().keys().copied().collect();
-        for pid in current.difference(&known) {
+        let fresh: Vec<Pid> = sys
+            .processes()
+            .iter()
+            .filter(|(pid, p)| detailed.get(*pid) != Some(&p.start_time()))
+            .map(|(pid, _)| *pid)
+            .collect();
+        refresh_process_details(&mut sys, &fresh);
+        for pid in &fresh {
             if let Some(p) = sys.process(*pid) {
                 inspect_new_process(&cfg, &alerts, &sys, p, &mut warned_unlisted_paths);
+                detailed.insert(*pid, p.start_time());
             }
         }
+        detailed.retain(|pid, _| current.contains(pid));
         trust_watch.observe(&cfg, &alerts, &sys, &known, &current);
 
         for (pid, p) in sys.processes() {
