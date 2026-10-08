@@ -59,16 +59,11 @@ fn url_host_is_non_routable(url: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || is_non_routable_ip(host)
 }
 
+const WEAK_OBFUSCATION_MARKERS: &[&str] = &["eval(", "Function(", "fromCharCode", "atob(", "btoa(", "XOR", "base64"];
+
 const OBFUSCATION_MARKERS: &[&str] = &[
-    "eval(",
-    "Function(",
-    "fromCharCode",
-    "atob(",
-    "btoa(",
     "createDecipheriv",
     "createCipheriv",
-    "XOR",
-    "base64",
     "-EncodedCommand",
     "-enc ",
     "IEX ",
@@ -270,6 +265,20 @@ pub fn score_command_line(cmdline: &str, max_decode_depth: u32) -> Option<Verdic
         reasons.push(format!("generic obfuscation/exfil marker(s): {}", hits.join(", ")));
         has_strong_signal = true;
         has_content_signal = true;
+    }
+
+    let weak_hits: Vec<&str> = WEAK_OBFUSCATION_MARKERS
+        .iter()
+        .filter(|m| scored.contains(*m))
+        .copied()
+        .collect();
+    if !weak_hits.is_empty() {
+        score += 1;
+        reasons.push(format!(
+            "common JavaScript construct(s) (score only, not content on their own): {}",
+            weak_hits.join(", ")
+        ));
+        has_strong_signal = true;
     }
 
     let symbol_count = scored
