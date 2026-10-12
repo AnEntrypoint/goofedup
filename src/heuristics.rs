@@ -562,23 +562,23 @@ pub fn is_dev_toolchain_path(exe_lower: &str) -> bool {
     is_python_console_script || TOOLCHAIN_FRAGMENTS.iter().any(|f| normalized.contains(f))
 }
 
-const KNOWN_NAME_HOMES: &[(&str, &[&str])] = &[
-    ("svchost.exe", &["\\windows\\system32", "\\windows\\syswow64"]),
-    ("explorer.exe", &["\\windows"]),
-    ("csrss.exe", &["\\windows\\system32"]),
-    ("lsass.exe", &["\\windows\\system32"]),
-    ("winlogon.exe", &["\\windows\\system32"]),
-    ("services.exe", &["\\windows\\system32"]),
-    ("smss.exe", &["\\windows\\system32"]),
-    ("wininit.exe", &["\\windows\\system32"]),
-    ("spoolsv.exe", &["\\windows\\system32"]),
-    ("dllhost.exe", &["\\windows\\system32", "\\windows\\syswow64"]),
-    ("rundll32.exe", &["\\windows\\system32", "\\windows\\syswow64"]),
-    ("taskhost.exe", &["\\windows\\system32"]),
-    ("taskhostw.exe", &["\\windows\\system32"]),
-    ("conhost.exe", &["\\windows\\system32"]),
-    ("lsm.exe", &["\\windows\\system32"]),
-    ("searchindexer.exe", &["\\windows"]),
+const KNOWN_NAME_HOMES: &[(&str, &[&str], bool)] = &[
+    ("svchost.exe", &["\\windows\\system32", "\\windows\\syswow64"], true),
+    ("explorer.exe", &["\\windows"], true),
+    ("csrss.exe", &["\\windows\\system32"], true),
+    ("lsass.exe", &["\\windows\\system32"], true),
+    ("winlogon.exe", &["\\windows\\system32"], true),
+    ("services.exe", &["\\windows\\system32"], true),
+    ("smss.exe", &["\\windows\\system32"], true),
+    ("wininit.exe", &["\\windows\\system32"], true),
+    ("spoolsv.exe", &["\\windows\\system32"], true),
+    ("dllhost.exe", &["\\windows\\system32", "\\windows\\syswow64"], true),
+    ("rundll32.exe", &["\\windows\\system32", "\\windows\\syswow64"], true),
+    ("taskhost.exe", &["\\windows\\system32"], true),
+    ("taskhostw.exe", &["\\windows\\system32"], true),
+    ("conhost.exe", &["\\windows\\system32"], true),
+    ("lsm.exe", &["\\windows\\system32"], true),
+    ("searchindexer.exe", &["\\windows"], true),
     (
         "node.exe",
         &[
@@ -588,20 +588,30 @@ const KNOWN_NAME_HOMES: &[(&str, &[&str])] = &[
             "appdata\\local\\fnm",
             ADOBE_CREATIVE_CLOUD_BUNDLED_NODE_HOME,
         ],
+        false,
     ),
-    ("node", &["/usr/", "/opt/", "/.nvm/", "/.fnm/", "/.local/"]),
-    ("python.exe", &["\\python", "\\program files"]),
-    ("chrome.exe", &["\\google\\chrome", "\\program files"]),
-    ("discord.exe", &["\\discord\\app-", "\\appdata\\local\\discord\\discord.exe"]),
-    ("launchd", &["/sbin/", "/usr/libexec/"]),
-    ("kernel_task", &["/System/"]),
-    ("windowserver", &["/system/library/"]),
-    ("coreaudiod", &["/usr/sbin/"]),
-    ("systemd", &["/usr/lib/systemd/", "/lib/systemd/", "/sbin/"]),
-    ("init", &["/sbin/", "/usr/sbin/"]),
-    ("sshd", &["/usr/sbin/", "/usr/bin/"]),
-    ("cron", &["/usr/sbin/"]),
+    ("node", &["/usr/", "/opt/", "/.nvm/", "/.fnm/", "/.local/"], false),
+    ("python.exe", &["\\python", "\\program files"], false),
+    ("chrome.exe", &["\\google\\chrome", "\\program files"], false),
+    ("discord.exe", &["\\discord\\app-", "\\appdata\\local\\discord\\discord.exe"], false),
+    ("launchd", &["/sbin/", "/usr/libexec/"], true),
+    ("kernel_task", &["/System/"], true),
+    ("windowserver", &["/system/library/"], true),
+    ("coreaudiod", &["/usr/sbin/"], true),
+    ("systemd", &["/usr/lib/systemd/", "/lib/systemd/", "/sbin/"], true),
+    ("init", &["/sbin/", "/usr/sbin/"], true),
+    ("sshd", &["/usr/sbin/", "/usr/bin/"], true),
+    ("cron", &["/usr/sbin/"], true),
 ];
+
+pub fn is_os_owned_process_name(name: &str) -> bool {
+    let name_lower = name.to_lowercase();
+    KNOWN_NAME_HOMES.iter().any(|(known, _, os_owned)| name_lower == *known && *os_owned)
+}
+
+pub fn name_has_spoofing_chars(name: &str) -> bool {
+    suspicious_name_chars(name).is_some()
+}
 
 pub fn score_process_name(name: &str, exe_path: &str) -> Option<Verdict> {
     let mut score = 0u32;
@@ -614,7 +624,7 @@ pub fn score_process_name(name: &str, exe_path: &str) -> Option<Verdict> {
 
     let name_lower = name.to_lowercase();
     let path_lower = exe_path.to_lowercase();
-    for (known_name, homes) in KNOWN_NAME_HOMES {
+    for (known_name, homes, _) in KNOWN_NAME_HOMES {
         if name_lower == *known_name {
             let at_home = homes.iter().any(|h| path_lower.contains(h));
             if !at_home && !exe_path.is_empty() {

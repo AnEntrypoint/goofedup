@@ -1,6 +1,6 @@
 use crate::alert::AlertSink;
 use crate::config::{Config, SharedConfig};
-use crate::heuristics::{decode_encoded_command, is_denied_exec_path, is_unlisted_exec_path, score_command_line, score_process_name};
+use crate::heuristics::{decode_encoded_command, is_denied_exec_path, is_os_owned_process_name, is_unlisted_exec_path, name_has_spoofing_chars, score_command_line, score_process_name};
 use crate::process_trust::{self, ProcessTrust};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +11,15 @@ use sysinfo::{Pid, ProcessesToUpdate, ProcessRefreshKind, System, UpdateKind};
 const CMDLINE_EVIDENCE_HEAD_CHARS: usize = 1200;
 const DECODED_COMMAND_EVIDENCE_HEAD_CHARS: usize = 300;
 const ANCESTOR_WALK_MAX_DEPTH: u32 = 4;
+const BURST_ESCALATION_FACTOR: u64 = 2;
+const BURST_EPISODE_TRACK_LIMIT: usize = 4096;
+
+#[derive(Clone, Copy, Default)]
+struct BurstEpisode {
+    alerts: u32,
+    peak_delta: u64,
+    suppression_noticed: bool,
+}
 
 struct ReadTracker {
     last_total_read: u64,
@@ -94,6 +103,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
     }
 
     let mut read_trackers: HashMap<Pid, ReadTracker> = HashMap::new();
+    let mut burst_episodes: HashMap<String, BurstEpisode> = HashMap::new();
     let mut warned_unlisted_paths: HashSet<String> = HashSet::new();
     let mut trust_watch = ProcessTrust::new();
 
@@ -127,7 +137,7 @@ pub fn run(cfg_shared: SharedConfig, alerts: Arc<AlertSink>, running: Arc<Atomic
         trust_watch.observe(&cfg, &alerts, &sys, &known, &current);
 
         for (pid, p) in sys.processes() {
-            check_read_burst(&cfg, &alerts, *pid, p, &mut read_trackers);
+            check_read_burst(&cfg, &alerts, *pid, p, &mut read_trackers, &mut burst_episodes);
         }
         read_trackers.retain(|pid, _| current.contains(pid));
 
@@ -167,6 +177,7 @@ fn check_read_burst(
     pid: Pid,
     p: &sysinfo::Process,
     trackers: &mut HashMap<Pid, ReadTracker>,
+    episodes: &mut HashMap<String, BurstEpisode>,
 ) {
     if is_kernel_attributed_pid(pid) {
         return;
@@ -255,20 +266,50 @@ fn check_read_burst(
         } else {
             "a sustained spike versus its own recent baseline"
         };
-        alerts.critical(
-            "file-read-burst",
-            format!(
-                "'{name}' (PID {}) read an unusual amount of file data -- {reason}, the tell-tale shape of drive scanning/harvesting",
-                pid.as_u32()
-            ),
-            format!(
-                "read {} in ~{}s (baseline avg ~{}/poll){}",
-                format_bytes(delta),
-                cfg.poll_interval_secs,
-                format_bytes(tracker.avg_delta as u64),
-                if exe_path.is_empty() { String::new() } else { format!(", exe={exe_path}") }
-            ),
+        let episode_key = (if exe_path.is_empty() { name.clone() } else { exe_path.clone() }).to_lowercase();
+        let trackable = episodes.contains_key(&episode_key) || episodes.len() < BURST_EPISODE_TRACK_LIMIT;
+        let prior = episodes.get(&episode_key).copied();
+        let repeats = prior.map_or(0, |e| e.alerts) + 1;
+        let escalation_bar = prior.map_or(0, |e| e.peak_delta.saturating_mul(BURST_ESCALATION_FACTOR));
+        let repeat_note = if repeats > 1 {
+            format!(", repeat={repeats} highest_reported={}", format_bytes(prior.map_or(0, |e| e.peak_delta)))
+        } else {
+            String::new()
+        };
+        let exe_note = if exe_path.is_empty() { String::new() } else { format!(", exe={exe_path}") };
+        let message = format!(
+            "'{name}' (PID {}) read an unusual amount of file data -- {reason}, the tell-tale shape of drive scanning/harvesting",
+            pid.as_u32()
         );
+        let evidence = format!(
+            "read {} in ~{}s (baseline avg ~{}/poll){exe_note}{repeat_note}",
+            format_bytes(delta),
+            cfg.poll_interval_secs,
+            format_bytes(tracker.avg_delta as u64),
+        );
+
+        if !trackable || is_absolute_burst || delta >= escalation_bar {
+            if trackable {
+                let entry = episodes.entry(episode_key.clone()).or_default();
+                entry.alerts = repeats;
+                entry.peak_delta = entry.peak_delta.max(delta);
+                entry.suppression_noticed = false;
+            }
+            alerts.critical("file-read-burst", message, evidence);
+        } else if let Some(entry) = episodes.get_mut(&episode_key) {
+            entry.alerts = repeats;
+            if !entry.suppression_noticed {
+                entry.suppression_noticed = true;
+                alerts.warn(
+                    "file-read-burst",
+                    format!(
+                        "'{name}' (PID {}) repeated a file-read burst already reported -- repeats stay silent unless the spike grows past the highest one reported",
+                        pid.as_u32()
+                    ),
+                    evidence,
+                );
+            }
+        }
     } else if !is_absolute_burst && !is_relative_spike {
         tracker.alerted_this_burst = false;
     }
@@ -336,11 +377,13 @@ fn inspect_new_process(
     }
 
     if let Some(v) = score_process_name(&name, &exe_path) {
-        alerts.critical(
-            "process-name",
-            format!("'{name}' (PID {pid}) name looks suspicious"),
-            format!("score={} reasons=[{}]", v.score, v.reasons.join("; ")),
-        );
+        let message = format!("'{name}' (PID {pid}) name looks suspicious");
+        let evidence = format!("score={} reasons=[{}]", v.score, v.reasons.join("; "));
+        if name_has_spoofing_chars(&name) || is_os_owned_process_name(&name) {
+            alerts.critical("process-name", message, evidence);
+        } else {
+            alerts.warn("process-name", message, evidence);
+        }
     }
 
     let name_lower = name.to_lowercase();
